@@ -82,20 +82,27 @@ fi
 
 # ── Resolver binário do OpenClaw ─────────────────────────────────────────────
 # Prioridade:
-#   1. Fonte local compilado  ($REPO_ROOT/dist existe)
+#   1. Fonte local compilado  (dist/entry.mjs ou dist/entry.js existe)
 #   2. Binário global         (openclaw no PATH)
-DIST_ENTRY="$REPO_ROOT/dist/entry.mjs"
-if [[ -f "$DIST_ENTRY" ]]; then
-    # Fonte local compilado — usa openclaw.mjs que aponta para dist/
+DIST_ENTRY=""
+[[ -f "$REPO_ROOT/dist/entry.mjs" ]] && DIST_ENTRY="$REPO_ROOT/dist/entry.mjs"
+[[ -z "$DIST_ENTRY" ]] && [[ -f "$REPO_ROOT/dist/entry.js" ]] && DIST_ENTRY="$REPO_ROOT/dist/entry.js"
+
+if [[ -n "$DIST_ENTRY" ]]; then
+    # Fonte local compilado — openclaw.mjs encontra o dist/ automaticamente
     RUN_CMD="node $OPENCLAW_BIN"
-    _info "Usando fonte local compilado ($REPO_ROOT)"
+    _info "Usando fonte local compilado: $DIST_ENTRY"
 elif command -v openclaw &>/dev/null; then
     # Instalação global via npm
     RUN_CMD="openclaw"
     _info "Usando openclaw global ($(openclaw --version 2>/dev/null || echo 'versão desconhecida'))"
 else
-    _err "OpenClaw não encontrado. Escolha uma opção:"
-    _err "  A) Compilar do fonte:  npm install -g pnpm && cd $REPO_ROOT && pnpm install && pnpm build"
+    _err "OpenClaw não encontrado."
+    _err "  Dist esperado em: $REPO_ROOT/dist/entry.(m)js"
+    _err "  Conteúdo atual de dist/: $(ls "$REPO_ROOT/dist/" 2>/dev/null | head -5 || echo '(vazio ou ausente)')"
+    _err ""
+    _err "  Opções:"
+    _err "  A) Compilar do fonte:    cd $REPO_ROOT && pnpm install && pnpm build"
     _err "  B) Instalar globalmente: npm install -g openclaw@latest"
     exit 1
 fi
