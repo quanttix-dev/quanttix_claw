@@ -80,15 +80,24 @@ if (( NODE_MAJOR < 22 )); then
     exit 1
 fi
 
-# Instala dependências se necessário
-if [[ ! -d "$REPO_ROOT/node_modules" ]]; then
-    _info "node_modules ausente — instalando dependências (pnpm install) …"
-    cd "$REPO_ROOT"
-    if command -v pnpm &>/dev/null; then
-        pnpm install --frozen-lockfile
-    else
-        npm install --omit=dev
-    fi
+# ── Resolver binário do OpenClaw ─────────────────────────────────────────────
+# Prioridade:
+#   1. Fonte local compilado  ($REPO_ROOT/dist existe)
+#   2. Binário global         (openclaw no PATH)
+DIST_ENTRY="$REPO_ROOT/dist/entry.mjs"
+if [[ -f "$DIST_ENTRY" ]]; then
+    # Fonte local compilado — usa openclaw.mjs que aponta para dist/
+    RUN_CMD="node $OPENCLAW_BIN"
+    _info "Usando fonte local compilado ($REPO_ROOT)"
+elif command -v openclaw &>/dev/null; then
+    # Instalação global via npm
+    RUN_CMD="openclaw"
+    _info "Usando openclaw global ($(openclaw --version 2>/dev/null || echo 'versão desconhecida'))"
+else
+    _err "OpenClaw não encontrado. Escolha uma opção:"
+    _err "  A) Compilar do fonte:  npm install -g pnpm && cd $REPO_ROOT && pnpm install && pnpm build"
+    _err "  B) Instalar globalmente: npm install -g openclaw@latest"
+    exit 1
 fi
 
 # Para gateway anterior se ainda rodando
@@ -103,10 +112,10 @@ mkdir -p /tmp/quanttix
 # Inicia gateway
 _info "Iniciando OpenClaw gateway na porta $GATEWAY_PORT …"
 export OPENCLAW_GATEWAY_TOKEN
-nohup node "$OPENCLAW_BIN" gateway run \
+# shellcheck disable=SC2086
+nohup $RUN_CMD gateway run \
     --bind loopback \
     --port "$GATEWAY_PORT" \
-    --force \
     > "$LOG_FILE" 2>&1 &
 GATEWAY_PID=$!
 echo "$GATEWAY_PID" > "$PID_FILE"
