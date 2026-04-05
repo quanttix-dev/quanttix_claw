@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# start_gateway.sh — Inicia (ou para) o gateway OpenClaw no ambiente Quanttix
+# Uso:
+#   ./scripts/start_gateway.sh           # inicia
+#   ./scripts/start_gateway.sh --stop    # para
+#   ./scripts/start_gateway.sh --status  # verifica
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="$REPO_ROOT/scripts/quanttix.env"
+OPENCLAW_BIN="$REPO_ROOT/openclaw.mjs"
+LOG_FILE="/tmp/quanttix/openclaw_gateway.log"
+PID_FILE="/tmp/quanttix/openclaw_gateway.pid"
+GATEWAY_PORT="${CLAW_GATEWAY_PORT:-18789}"
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+_info()  { echo -e "\033[0;36m[CLAW]\033[0m  $*"; }
+_ok()    { echo -e "\033[0;32m[CLAW]\033[0m  $*"; }
+_warn()  { echo -e "\033[0;33m[CLAW]\033[0m  $*"; }
+_err()   { echo -e "\033[0;31m[CLAW]\033[0m  $*" >&2; }
+
+# Carrega quanttix.env se existir
+_load_env() {
+    if [[ -f "$ENV_FILE" ]]; then
+        # shellcheck disable=SC1090
+        set -a; source "$ENV_FILE"; set +a
+    fi
+}
+
+_port_in_use() { ss -ltn 2>/dev/null | grep -q ":$1 " || nc -z 127.0.0.1 "$1" 2>/dev/null; }
+
+_stop_gateway() {
+    _info "Parando gateway OpenClaw …"
+    if [[ -f "$PID_FILE" ]]; then
+        PID=$(cat "$PID_FILE")
+        if kill -0 "$PID" 2>/dev/null; then
+            kill "$PID" && _ok "Gateway (PID $PID) encerrado."
+        else
+            _warn "PID $PID não encontrado — já estava parado."
+        fi
+        rm -f "$PID_FILE"
+    fi
+    # Mata processos órfãos
+    pkill -f "openclaw.*gateway" 2>/dev/null || true
+    sleep 1
+    _ok "Pronto."
+}
+
+_status_gateway() {
+    if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+        _ok "Gateway rodando (PID $(cat "$PID_FILE"), porta $GATEWAY_PORT)"
+    elif _port_in_use "$GATEWAY_PORT"; then
+        _warn "Porta $GATEWAY_PORT em uso (sem PID registrado)"
+    else
+        _info "Gateway parado."
+    fi
+}
+
+# ── main ─────────────────────────────────────────────────────────────────────
+case "${1:-}" in
+    --stop)   _load_env; _stop_gateway; exit 0 ;;
+    --status) _load_env; _status_gateway; exit 0 ;;
+esac
+
+_load_env
+
+# Verifica se setup já foi executado
+if [[ -z "${OPENCLAW_GATEWAY_TOKEN:-}" ]]; then
+    _err "OPENCLAW_GATEWAY_TOKEN não definido."
+    _err "Execute primeiro: python3 scripts/setup_quanttix_config.py"
+    exit 1
+fi
+
+# Verifica Node.js
+NODE_VER=$(node --version 2>/dev/null | sed 's/v//') || { _err "Node.js não encontrado."; exit 1; }
+NODE_MAJOR="${NODE_VER%%.*}"
+if (( NODE_MAJOR < 22 )); then
+    _err "Node.js >= 22 necessário (atual: v$NODE_VER)"
+    exit 1
+fi
+
+# Instala dependências se necessário
+if [[ ! -d "$REPO_ROOT/node_modules" ]]; then
+    _info "node_modules ausente — instalando dependências (pnpm install) …"
+    cd "$REPO_ROOT"
+    if command -v pnpm &>/dev/null; then
+        pnpm install --frozen-lockfile
+    else
+        npm install --omit=dev
+    fi
+fi
+
+# Para gateway anterior se ainda rodando
+if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+    _info "Gateway já rodando (PID $(cat "$PID_FILE")) — reiniciando …"
+    _stop_gateway
+fi
+
+# Cria dir de logs/pids
+mkdir -p /tmp/quanttix
+
+# Inicia gateway
+_info "Iniciando OpenClaw gateway na porta $GATEWAY_PORT …"
+export OPENCLAW_GATEWAY_TOKEN
+nohup node "$OPENCLAW_BIN" gateway run \
+    --bind loopback \
+    --port "$GATEWAY_PORT" \
+    --force \
+    > "$LOG_FILE" 2>&1 &
+GATEWAY_PID=$!
+echo "$GATEWAY_PID" > "$PID_FILE"
+
+# Aguarda até 15s
+_info "Aguardando gateway subir (PID $GATEWAY_PID) …"
+for i in $(seq 1 15); do
+    sleep 1
+    if ! kill -0 "$GATEWAY_PID" 2>/dev/null; then
+        _err "Gateway encerrou inesperadamente. Últimas linhas do log:"
+        tail -20 "$LOG_FILE" >&2
+        exit 1
+    fi
+    if _port_in_use "$GATEWAY_PORT"; then
+        _ok "Gateway OpenClaw pronto na porta $GATEWAY_PORT (PID $GATEWAY_PID)"
+        exit 0
+    fi
+done
+
+_warn "Gateway pode ainda estar inicializando — verifique: tail -f $LOG_FILE"
