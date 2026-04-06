@@ -128,6 +128,14 @@ mkdir -p /tmp/quanttix
 # Inicia gateway
 _info "Iniciando OpenClaw gateway na porta $GATEWAY_PORT …"
 export OPENCLAW_GATEWAY_TOKEN
+
+# Aponta bundled plugins para disco local (/root/) onde chmod funciona
+# /workspace é NFS e ignora chmod — todos os plugins seriam bloqueados sem isso
+if [[ -n "${OPENCLAW_BUNDLED_PLUGINS_DIR:-}" ]]; then
+    export OPENCLAW_BUNDLED_PLUGINS_DIR
+    _info "Bundled plugins: $OPENCLAW_BUNDLED_PLUGINS_DIR"
+fi
+
 # shellcheck disable=SC2086
 nohup $RUN_CMD gateway run \
     --bind loopback \
