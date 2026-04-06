@@ -78,37 +78,42 @@ case "${1:-}" in
     --logs)
         echo -e "\033[1;37m[CLAW] Logs em tempo real — Ctrl+C para sair\033[0m"
         trap 'echo -e "\n\033[0;36m[CLAW]\033[0m Logs encerrados. Gateway ainda rodando."; exit 0' INT
-        # Log interno do gateway (onde o OpenClaw realmente escreve)
         TODAY_LOG="/tmp/openclaw/openclaw-$(date +%Y-%m-%d).log"
         FOLLOW_LOG="${TODAY_LOG}"
-        # Fallback para o nohup stdout se o log interno não existir ainda
         [[ ! -f "$FOLLOW_LOG" ]] && FOLLOW_LOG="$LOG_FILE"
-        tail -n 80 -F "$FOLLOW_LOG" 2>/dev/null | while IFS= read -r line; do
-            # Timestamp: 2026-04-06T01:43:05.530+00:00  → cinza
-            ts=$(echo "$line" | grep -oP '^\d{4}-\d{2}-\d{2}T[\d:.+]+')
-            rest="${line#"$ts"}"
-            ts_fmt="\033[2;37m${ts}\033[0m"  # cinza dim
-
-            # Colorir por categoria
-            case "$rest" in
-                *"failed"*|*"error"*|*"Error"*|*"ERROR"*)
-                    echo -e "${ts_fmt}\033[0;31m${rest}\033[0m" ;;  # vermelho
-                *"[plugins]"*)
-                    echo -e "${ts_fmt}\033[0;33m${rest}\033[0m" ;;  # amarelo
-                *"[gateway] ready"*)
-                    echo -e "${ts_fmt}\033[1;32m${rest}\033[0m" ;;  # verde bold
-                *"[gateway]"*)
-                    echo -e "${ts_fmt}\033[0;36m${rest}\033[0m" ;;  # ciano
-                *"[hooks]"*)
-                    echo -e "${ts_fmt}\033[0;32m${rest}\033[0m" ;;  # verde
-                *"[canvas]"*)
-                    echo -e "${ts_fmt}\033[0;35m${rest}\033[0m" ;;  # magenta
-                *"[heartbeat]"*|*"[health-monitor]"*)
-                    echo -e "${ts_fmt}\033[2;37m${rest}\033[0m" ;;  # cinza dim
-                *)
-                    echo -e "${ts_fmt}${rest}" ;;
-            esac
-        done
+        tail -n 80 -F "$FOLLOW_LOG" 2>/dev/null | python3 -u -c "
+import sys, json
+C = {
+    'error':   '\033[0;31m', 'warn':    '\033[0;33m',
+    'gateway': '\033[0;36m', 'plugins': '\033[0;33m',
+    'hooks':   '\033[0;32m', 'canvas':  '\033[0;35m',
+    'cron':    '\033[2;37m', 'health':  '\033[2;37m',
+}
+DIM = '\033[2;37m'; RST = '\033[0m'; GREEN = '\033[1;32m'
+for raw in sys.stdin:
+    raw = raw.rstrip()
+    try:
+        d = json.loads(raw)
+        ts = d.get('time', '')[:19]
+        sub = str(d.get('0', ''))
+        msg = str(d.get('1', '') if d.get('1') is not None else d.get('2', ''))
+        lvl = d.get('_meta', {}).get('logLevelName', '').lower()
+        color = RST
+        if lvl in ('error', 'fatal'):
+            color = C['error']
+        elif lvl == 'warn':
+            color = C['warn']
+        elif 'ready' in msg.lower():
+            color = GREEN
+        else:
+            for k, v in C.items():
+                if k in sub.lower():
+                    color = v
+                    break
+        print(f'{DIM}{ts}{RST} {color}[{lvl.upper():5s}] {sub} {msg}{RST}', flush=True)
+    except (json.JSONDecodeError, KeyError):
+        print(raw, flush=True)
+"
         exit 0
         ;;
 esac
