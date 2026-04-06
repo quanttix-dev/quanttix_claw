@@ -19,7 +19,6 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const PROXY_PORT = parseInt(process.env.CANVAS_PROXY_PORT || '8888');
 const TARGET_HOST = '127.0.0.1';
 const GATEWAY_PORT = parseInt(process.env.CLAW_GATEWAY_PORT || '18789');
-const DASHBOARD_PORT = parseInt(process.env.CLAW_DASHBOARD_PORT || String(GATEWAY_PORT + 2));
 
 // Carrega token do env ou do quanttix.env
 let TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || '';
@@ -37,16 +36,8 @@ if (!TOKEN) {
   process.exit(1);
 }
 
-function resolveTarget(url) {
-  // /__openclaw__/* → gateway, tudo mais → dashboard
-  if (url.startsWith('/__openclaw__')) {
-    return GATEWAY_PORT;
-  }
-  return DASHBOARD_PORT;
-}
-
 const server = http.createServer((req, res) => {
-  const targetPort = resolveTarget(req.url);
+  const targetPort = GATEWAY_PORT;
   const options = {
     hostname: TARGET_HOST,
     port: targetPort,
@@ -74,11 +65,10 @@ const server = http.createServer((req, res) => {
 
 // WebSocket: túnel TCP com Bearer injetado no upgrade request
 server.on('upgrade', (req, clientSocket, head) => {
-  const targetPort = resolveTarget(req.url);
-  const targetSocket = net.connect(targetPort, TARGET_HOST, () => {
+  const targetSocket = net.connect(GATEWAY_PORT, TARGET_HOST, () => {
     const upgradeHeaders = {
       ...req.headers,
-      host: `${TARGET_HOST}:${targetPort}`,
+      host: `${TARGET_HOST}:${GATEWAY_PORT}`,
       authorization: `Bearer ${TOKEN}`,
     };
     const headerLines = Object.entries(upgradeHeaders)
@@ -96,7 +86,5 @@ server.on('upgrade', (req, clientSocket, head) => {
 });
 
 server.listen(PROXY_PORT, '0.0.0.0', () => {
-  console.log(`[canvas-proxy] porta ${PROXY_PORT}`);
-  console.log(`  /__openclaw__/* → ${TARGET_HOST}:${GATEWAY_PORT} (gateway)`);
-  console.log(`  /*              → ${TARGET_HOST}:${DASHBOARD_PORT} (dashboard)`);
+  console.log(`[canvas-proxy] porta ${PROXY_PORT} → ${TARGET_HOST}:${GATEWAY_PORT}`);
 });
