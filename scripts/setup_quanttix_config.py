@@ -67,11 +67,15 @@ def save_env(env: dict[str, str]) -> None:
 
 
 def fix_permissions(path: Path) -> None:
-    """755 em dirs, 644 em arquivos."""
+    """755 em dirs, 644 em arquivos reais (ignora symlinks quebrados)."""
     for root, dirs, files in os.walk(path):
         os.chmod(root, 0o755)
         for f in files:
-            os.chmod(os.path.join(root, f), 0o644)
+            full = os.path.join(root, f)
+            # Pula symlinks quebrados (target não existe)
+            if os.path.islink(full) and not os.path.exists(full):
+                continue
+            os.chmod(full, 0o644)
 
 
 def sync_to_local(src: Path, dst: Path, label: str) -> str:
