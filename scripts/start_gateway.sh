@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # start_gateway.sh — Inicia (ou para) o gateway OpenClaw no ambiente Quanttix
 # Uso:
-#   ./scripts/start_gateway.sh           # inicia
-#   ./scripts/start_gateway.sh --stop    # para
-#   ./scripts/start_gateway.sh --status  # verifica
-#   ./scripts/start_gateway.sh --logs    # tail do log em tempo real
+#   ./scripts/start_gateway.sh             # inicia
+#   ./scripts/start_gateway.sh --stop      # para
+#   ./scripts/start_gateway.sh --restart   # para e reinicia
+#   ./scripts/start_gateway.sh --status    # verifica
+#   ./scripts/start_gateway.sh --logs      # tail do log em tempo real
 
 set -euo pipefail
 
@@ -60,8 +61,9 @@ _status_gateway() {
 
 # ── main ─────────────────────────────────────────────────────────────────────
 case "${1:-}" in
-    --stop)   _load_env; _stop_gateway; exit 0 ;;
-    --status) _load_env; _status_gateway; exit 0 ;;
+    --stop)    _load_env; _stop_gateway; exit 0 ;;
+    --status)  _load_env; _status_gateway; exit 0 ;;
+    --restart) _load_env; _stop_gateway; sleep 1; exec "$0" ;;
     --logs)
         echo -e "\033[1;37m[CLAW] Logs em tempo real — Ctrl+C para sair\033[0m"
         trap 'echo -e "\n\033[0;36m[CLAW]\033[0m Logs encerrados. Gateway ainda rodando."; exit 0' INT
