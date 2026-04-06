@@ -82,7 +82,7 @@ def sync_to_local(src: Path, dst: Path, label: str) -> str:
     print(f"\n[{label}] Copiando para disco local: {dst}")
     if dst.exists():
         shutil.rmtree(dst)
-    shutil.copytree(src, dst)
+    shutil.copytree(src, dst, symlinks=True)
     fix_permissions(dst)
     print(f"  chmod 755/644 aplicado ✓")
     return str(dst)
