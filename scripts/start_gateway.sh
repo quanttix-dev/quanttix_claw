@@ -49,8 +49,8 @@ _stop_gateway() {
     fi
     # Para proxy canvas se rodando
     if [[ -f "$PROXY_PID_FILE" ]]; then
-        PPID=$(cat "$PROXY_PID_FILE")
-        kill "$PPID" 2>/dev/null && _ok "Canvas proxy (PID $PPID) encerrado."
+        PROXY_OLD_PID=$(cat "$PROXY_PID_FILE")
+        kill "$PROXY_OLD_PID" 2>/dev/null && _ok "Canvas proxy (PID $PROXY_OLD_PID) encerrado."
         rm -f "$PROXY_PID_FILE"
     fi
     pkill -f "openclaw.*gateway" 2>/dev/null || true
