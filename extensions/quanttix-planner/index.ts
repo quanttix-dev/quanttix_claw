@@ -34,7 +34,7 @@ export default definePluginEntry({
       envVars: [],
       auth: [],
 
-      discovery: {
+      catalog: {
         run: async (_ctx) => {
           return {
             provider: {
