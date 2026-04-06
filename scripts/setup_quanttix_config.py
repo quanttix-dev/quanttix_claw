@@ -24,7 +24,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE   = REPO_ROOT / "scripts" / "quanttix.env"
-OPENCLAW_BIN = str(REPO_ROOT / "openclaw.mjs")
 
 # Caminhos de plugins (disco local — chmod funciona)
 LOCAL_PLUGINS_ROOT = Path("/root/openclaw-plugins")
@@ -44,7 +43,8 @@ def run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
 
 
 def openclaw(*args: str, check: bool = True) -> subprocess.CompletedProcess:
-    return run(["node", OPENCLAW_BIN, *args], check=check)
+    """Usa o binário global openclaw (npm install -g openclaw@latest)."""
+    return run(["openclaw", *args], check=check)
 
 
 def load_env() -> dict[str, str]:
@@ -136,9 +136,9 @@ def main() -> None:
         help="Porta do gateway OpenClaw (padrão: 18789)",
     )
     parser.add_argument(
-        "--skip-bundled",
+        "--copy-bundled",
         action="store_true",
-        help="Não recopiar os bundled plugins (mais rápido em re-execuções)",
+        help="Copiar bundled plugins para /root/ (experimental — pode causar crash)",
     )
     args = parser.parse_args()
 
@@ -166,13 +166,17 @@ def main() -> None:
     if plugin_local:
         env["CLAW_PLUGIN_LOCAL_PATH"] = plugin_local
 
-    # 5. Copia bundled plugins para disco local (resolve bloqueio NFS para todos os providers)
-    if not args.skip_bundled:
+    # 5. Bundled plugins — não copiamos por padrão.
+    # Copiar causa crash porque os chunks dist/ têm referências cruzadas que quebram fora do lugar.
+    # Os 98 plugins bundled ficam bloqueados pelo NFS (modo=777), mas silenciosamente.
+    # Só o quanttix-planner (copiado para /root/) é carregado — suficiente para o nosso uso.
+    if args.copy_bundled:
         bundled_local = sync_to_local(BUNDLED_SRC, BUNDLED_DST, "bundled")
         if bundled_local:
             env["OPENCLAW_BUNDLED_PLUGINS_DIR"] = bundled_local
-    elif BUNDLED_DST.exists():
-        env["OPENCLAW_BUNDLED_PLUGINS_DIR"] = str(BUNDLED_DST)
+    else:
+        # Garante que a variável não fique suja de execuções anteriores
+        env.pop("OPENCLAW_BUNDLED_PLUGINS_DIR", None)
 
     # Exporta token para autenticar comandos openclaw abaixo
     os.environ["OPENCLAW_GATEWAY_TOKEN"] = token

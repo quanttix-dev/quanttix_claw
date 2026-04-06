@@ -90,29 +90,11 @@ if (( NODE_MAJOR < 22 )); then
 fi
 
 # ── Resolver binário do OpenClaw ─────────────────────────────────────────────
-# Prioridade:
-#   1. Fonte local compilado  (dist/entry.mjs ou dist/entry.js existe)
-#   2. Binário global         (openclaw no PATH)
-DIST_ENTRY=""
-[[ -f "$REPO_ROOT/dist/entry.mjs" ]] && DIST_ENTRY="$REPO_ROOT/dist/entry.mjs"
-[[ -z "$DIST_ENTRY" ]] && [[ -f "$REPO_ROOT/dist/entry.js" ]] && DIST_ENTRY="$REPO_ROOT/dist/entry.js"
-
-if [[ -n "$DIST_ENTRY" ]]; then
-    # Fonte local compilado — openclaw.mjs encontra o dist/ automaticamente
-    RUN_CMD="node $OPENCLAW_BIN"
-    _info "Usando fonte local compilado: $DIST_ENTRY"
-elif command -v openclaw &>/dev/null; then
-    # Instalação global via npm
+if command -v openclaw &>/dev/null; then
     RUN_CMD="openclaw"
-    _info "Usando openclaw global ($(openclaw --version 2>/dev/null || echo 'versão desconhecida'))"
+    _info "OpenClaw $(openclaw --version 2>/dev/null || echo '') — $(which openclaw)"
 else
-    _err "OpenClaw não encontrado."
-    _err "  Dist esperado em: $REPO_ROOT/dist/entry.(m)js"
-    _err "  Conteúdo atual de dist/: $(ls "$REPO_ROOT/dist/" 2>/dev/null | head -5 || echo '(vazio ou ausente)')"
-    _err ""
-    _err "  Opções:"
-    _err "  A) Compilar do fonte:    cd $REPO_ROOT && pnpm install && pnpm build"
-    _err "  B) Instalar globalmente: npm install -g openclaw@latest"
+    _err "OpenClaw não encontrado. Instale com: npm install -g openclaw@latest"
     exit 1
 fi
 
@@ -129,12 +111,6 @@ mkdir -p /tmp/quanttix
 _info "Iniciando OpenClaw gateway na porta $GATEWAY_PORT …"
 export OPENCLAW_GATEWAY_TOKEN
 
-# Aponta bundled plugins para disco local (/root/) onde chmod funciona
-# /workspace é NFS e ignora chmod — todos os plugins seriam bloqueados sem isso
-if [[ -n "${OPENCLAW_BUNDLED_PLUGINS_DIR:-}" ]]; then
-    export OPENCLAW_BUNDLED_PLUGINS_DIR
-    _info "Bundled plugins: $OPENCLAW_BUNDLED_PLUGINS_DIR"
-fi
 
 # shellcheck disable=SC2086
 nohup $RUN_CMD gateway run \
