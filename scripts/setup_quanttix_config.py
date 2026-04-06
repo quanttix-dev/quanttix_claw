@@ -11,11 +11,13 @@ O script:
   2. Copia plugins para /root/ (disco local — NFS não suporta chmod)
   3. Cria symlink /root/.openclaw → /workspace/quanttix_claw/.openclaw/
      (dados/sessões ficam no volume persistente com espaço grande)
-  4. Configura gateway.mode=local e plugins.load.paths
-  5. Salva variáveis em scripts/quanttix.env para o start_gateway.sh carregar
+  4. Configura gateway (mode, bind, controlUi, allowedOrigins)
+  5. Registra provider quanttix-planner via models.providers (models.mode=merge)
+  6. Salva variáveis em scripts/quanttix.env para o start_gateway.sh carregar
 """
 
 import argparse
+import json
 import os
 import secrets
 import shutil
@@ -29,8 +31,6 @@ ENV_FILE   = REPO_ROOT / "scripts" / "quanttix.env"
 LOCAL_PLUGINS_ROOT = Path("/root/openclaw-plugins")
 PLUGIN_SRC  = REPO_ROOT / "extensions" / "quanttix-planner"
 PLUGIN_DST  = LOCAL_PLUGINS_ROOT / "quanttix-planner"
-BUNDLED_SRC = REPO_ROOT / "dist-runtime" / "extensions"
-BUNDLED_DST = LOCAL_PLUGINS_ROOT / "extensions"
 
 # Dados do OpenClaw (sessões, histórico) — ficam no volume /workspace
 OPENCLAW_DATA_DIR = REPO_ROOT / ".openclaw"       # /workspace/quanttix_claw/.openclaw
@@ -72,7 +72,6 @@ def fix_permissions(path: Path) -> None:
         os.chmod(root, 0o755)
         for f in files:
             full = os.path.join(root, f)
-            # Pula symlinks quebrados (target não existe)
             if os.path.islink(full) and not os.path.exists(full):
                 continue
             os.chmod(full, 0o644)
@@ -106,7 +105,6 @@ def setup_openclaw_data_dir() -> None:
         OPENCLAW_HOME_LINK.unlink()
 
     if OPENCLAW_HOME_LINK.exists():
-        # Era um diretório real — move conteúdo para o workspace e transforma em link
         print(f"\n[data] Movendo {OPENCLAW_HOME_LINK} para {OPENCLAW_DATA_DIR} …")
         for item in OPENCLAW_HOME_LINK.iterdir():
             dest = OPENCLAW_DATA_DIR / item.name
@@ -118,12 +116,33 @@ def setup_openclaw_data_dir() -> None:
     print(f"\n[data] Symlink criado: {OPENCLAW_HOME_LINK} → {OPENCLAW_DATA_DIR}")
 
 
+def detect_runpod_proxy_origin(expose_port: str) -> str:
+    """Detecta a URL do proxy RunPod a partir do hostname do POD."""
+    pod_id = os.environ.get("RUNPOD_POD_ID", "")
+    if not pod_id:
+        # Tenta extrair do hostname (formato: container_id, mas não tem pod_id)
+        # O pod_id normalmente vem da env var ou do SSH host
+        return ""
+    return f"https://{pod_id}-{expose_port}.proxy.runpod.net"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Configura OpenClaw para Quanttix")
     parser.add_argument(
         "--planner-url",
         default=os.environ.get("CLAW_PLANNER_URL", "http://localhost:8091/v1"),
         help="URL do servidor llama.cpp do planejador (padrão: http://localhost:8091/v1)",
+    )
+    parser.add_argument(
+        "--planner-model-id",
+        default=os.environ.get("CLAW_PLANNER_MODEL_ID", "gemma-4-e2b"),
+        help="Model ID do planner no llama.cpp (padrão: gemma-4-e2b)",
+    )
+    parser.add_argument(
+        "--planner-ctx",
+        type=int,
+        default=int(os.environ.get("CLAW_PLANNER_CTX", "32768")),
+        help="Context window do planner (padrão: 32768)",
     )
     parser.add_argument(
         "--token",
@@ -136,9 +155,14 @@ def main() -> None:
         help="Porta do gateway OpenClaw (padrão: 18789)",
     )
     parser.add_argument(
-        "--copy-bundled",
-        action="store_true",
-        help="Copiar bundled plugins para /root/ (experimental — pode causar crash)",
+        "--expose-port",
+        default=os.environ.get("CLAW_EXPOSE_PORT", "8888"),
+        help="Porta do proxy canvas para acesso externo (padrão: 8888)",
+    )
+    parser.add_argument(
+        "--canvas-origin",
+        default=os.environ.get("CLAW_CANVAS_ORIGIN", ""),
+        help="URL de origem para Canvas UI (ex: https://POD_ID-8888.proxy.runpod.net)",
     )
     args = parser.parse_args()
 
@@ -153,10 +177,15 @@ def main() -> None:
     env["OPENCLAW_GATEWAY_TOKEN"] = token
     print(f"[token] OPENCLAW_GATEWAY_TOKEN={token[:8]}…")
 
-    # 2. Porta e URL do planner
+    # 2. Porta, URL do planner e expose
     env["CLAW_GATEWAY_PORT"] = args.gateway_port
+    env["CLAW_EXPOSE_PORT"]  = args.expose_port
     env["CLAW_PLANNER_URL"]  = args.planner_url
+    env["CLAW_PLANNER_MODEL_ID"] = args.planner_model_id
+    env["CLAW_PLANNER_CTX"]  = str(args.planner_ctx)
     print(f"[planner] URL: {args.planner_url}")
+    print(f"[planner] Model ID: {args.planner_model_id}")
+    print(f"[planner] Context: {args.planner_ctx}")
 
     # 3. Symlink dados → /workspace (sessões e histórico no volume grande)
     setup_openclaw_data_dir()
@@ -166,38 +195,72 @@ def main() -> None:
     if plugin_local:
         env["CLAW_PLUGIN_LOCAL_PATH"] = plugin_local
 
-    # 5. Bundled plugins — não copiamos por padrão.
-    # Copiar causa crash porque os chunks dist/ têm referências cruzadas que quebram fora do lugar.
-    # Os 98 plugins bundled ficam bloqueados pelo NFS (modo=777), mas silenciosamente.
-    # Só o quanttix-planner (copiado para /root/) é carregado — suficiente para o nosso uso.
-    if args.copy_bundled:
-        bundled_local = sync_to_local(BUNDLED_SRC, BUNDLED_DST, "bundled")
-        if bundled_local:
-            env["OPENCLAW_BUNDLED_PLUGINS_DIR"] = bundled_local
-    else:
-        # Garante que a variável não fique suja de execuções anteriores
-        env.pop("OPENCLAW_BUNDLED_PLUGINS_DIR", None)
-
     # Exporta token para autenticar comandos openclaw abaixo
     os.environ["OPENCLAW_GATEWAY_TOKEN"] = token
 
-    # 6. Configura gateway via CLI
+    # 5. Configura gateway via CLI
     print("\n[config] Aplicando configurações via openclaw config …")
     plugin_path = env.get("CLAW_PLUGIN_LOCAL_PATH", str(PLUGIN_DST))
-    configs = [
+
+    # 5a. Provider do planner (via models.providers — não depende do plugin SDK)
+    planner_url = env.get("CLAW_PLANNER_URL", args.planner_url)
+    planner_model = env.get("CLAW_PLANNER_MODEL_ID", args.planner_model_id)
+    planner_ctx = int(env.get("CLAW_PLANNER_CTX", str(args.planner_ctx)))
+    provider_config = {
+        "baseUrl": planner_url,
+        "apiKey": "local",
+        "api": "openai-completions",
+        "models": [{
+            "id": planner_model,
+            "name": "Gemma 4 E2B (Quanttix Planner)",
+            "reasoning": False,
+            "input": ["text"],
+            "cost": {"input": 0, "output": 0},
+            "contextWindow": planner_ctx,
+            "maxTokens": 4096,
+        }],
+    }
+    provider_json = json.dumps(provider_config, separators=(",", ":"))
+
+    # 5b. Canvas UI — allowedOrigins para acesso externo via RunPod proxy
+    canvas_origin = args.canvas_origin or env.get("CLAW_CANVAS_ORIGIN", "")
+    if not canvas_origin:
+        canvas_origin = detect_runpod_proxy_origin(args.expose_port)
+    if canvas_origin:
+        env["CLAW_CANVAS_ORIGIN"] = canvas_origin
+        print(f"[canvas] Origin: {canvas_origin}")
+
+    configs: list[tuple[str, str]] = [
+        # Gateway
         ("gateway.mode", "local"),
         ("gateway.bind", "loopback"),
+        # Control UI — permite acesso externo via proxy
+        ("gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback", "true"),
+        # Plugins
         ("plugins.load.paths", f'["{plugin_path}"]'),
+        # Models — registra provider local via config (bypass do plugin SDK)
+        ("models.mode", "merge"),
+        ("models.providers.quanttix-planner", provider_json),
     ]
+
+    # Adiciona allowedOrigins se temos uma origin configurada
+    if canvas_origin:
+        configs.append((
+            "gateway.controlUi.allowedOrigins",
+            f'["{canvas_origin}"]',
+        ))
+
     for key, value in configs:
         result = openclaw("config", "set", key, value, check=False)
         status = "OK" if result.returncode == 0 else f"aviso ({result.stderr.strip()[:80]})"
         print(f"  {key}={value} → {status}")
 
-    # 7. Salva env
+    # 6. Salva env
     save_env(env)
 
-    print("\n[pronto] Execute ./scripts/start_gateway.sh para subir o gateway.")
+    print("\n[pronto] Para subir o gateway:")
+    print("  ./scripts/start_gateway.sh              # loopback (local)")
+    print("  ./scripts/start_gateway.sh --expose     # exposto via proxy (porta 8888)")
 
 
 if __name__ == "__main__":
