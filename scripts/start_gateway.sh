@@ -4,6 +4,7 @@
 #   ./scripts/start_gateway.sh           # inicia
 #   ./scripts/start_gateway.sh --stop    # para
 #   ./scripts/start_gateway.sh --status  # verifica
+#   ./scripts/start_gateway.sh --logs    # tail do log em tempo real
 
 set -euo pipefail
 
@@ -61,6 +62,12 @@ _status_gateway() {
 case "${1:-}" in
     --stop)   _load_env; _stop_gateway; exit 0 ;;
     --status) _load_env; _status_gateway; exit 0 ;;
+    --logs)
+        echo -e "\033[1;37m[CLAW] Logs em tempo real — Ctrl+C para sair\033[0m"
+        trap 'echo -e "\n\033[0;36m[CLAW]\033[0m Logs encerrados. Gateway ainda rodando."; exit 0' INT
+        tail -F "$LOG_FILE" 2>/dev/null
+        exit 0
+        ;;
 esac
 
 _load_env
