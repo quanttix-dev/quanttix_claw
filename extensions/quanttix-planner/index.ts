@@ -35,19 +35,19 @@ export default definePluginEntry({
       auth: [],
 
       discovery: {
-        order: "early",
-        run: async () => {
+        run: async (_ctx) => {
           return {
             provider: {
               baseUrl,
               apiKey: LOCAL_API_KEY,
-              api: "openai",
+              api: "openai-completions" as const,
               models: [
                 {
                   id: modelId,
                   name: "Gemma 4 E2B (Quanttix Planner)",
+                  reasoning: false,
                   input: ["text"] as ["text"],
-                  cost: { input: 0, output: 0 },
+                  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
                   contextWindow: 8192,
                   maxTokens: 2048,
                 },
