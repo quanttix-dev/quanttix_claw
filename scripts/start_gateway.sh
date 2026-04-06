@@ -67,7 +67,12 @@ case "${1:-}" in
     --logs)
         echo -e "\033[1;37m[CLAW] Logs em tempo real — Ctrl+C para sair\033[0m"
         trap 'echo -e "\n\033[0;36m[CLAW]\033[0m Logs encerrados. Gateway ainda rodando."; exit 0' INT
-        tail -n 50 -F "$LOG_FILE" 2>/dev/null | while IFS= read -r line; do
+        # Log interno do gateway (onde o OpenClaw realmente escreve)
+        TODAY_LOG="/tmp/openclaw/openclaw-$(date +%Y-%m-%d).log"
+        FOLLOW_LOG="${TODAY_LOG}"
+        # Fallback para o nohup stdout se o log interno não existir ainda
+        [[ ! -f "$FOLLOW_LOG" ]] && FOLLOW_LOG="$LOG_FILE"
+        tail -n 80 -F "$FOLLOW_LOG" 2>/dev/null | while IFS= read -r line; do
             # Timestamp: 2026-04-06T01:43:05.530+00:00  → cinza
             ts=$(echo "$line" | grep -oP '^\d{4}-\d{2}-\d{2}T[\d:.+]+')
             rest="${line#"$ts"}"
