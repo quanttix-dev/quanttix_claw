@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # start_gateway.sh — Inicia (ou para) o gateway OpenClaw no ambiente Quanttix
 # Uso:
-#   ./scripts/start_gateway.sh             # inicia
+#   ./scripts/start_gateway.sh             # inicia (loopback — só acesso local)
+#   ./scripts/start_gateway.sh --expose    # inicia exposto na LAN/RunPod (porta 8888)
 #   ./scripts/start_gateway.sh --stop      # para
 #   ./scripts/start_gateway.sh --restart   # para e reinicia
 #   ./scripts/start_gateway.sh --status    # verifica
@@ -15,6 +16,7 @@ OPENCLAW_BIN="$REPO_ROOT/openclaw.mjs"
 LOG_FILE="/tmp/quanttix/openclaw_gateway.log"
 PID_FILE="/tmp/quanttix/openclaw_gateway.pid"
 GATEWAY_PORT="${CLAW_GATEWAY_PORT:-18789}"
+EXPOSE_PORT="${CLAW_EXPOSE_PORT:-8888}"
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 _info()  { echo -e "\033[0;36m[CLAW]\033[0m  $*"; }
@@ -30,7 +32,7 @@ _load_env() {
     fi
 }
 
-_port_in_use() { ss -ltn 2>/dev/null | grep -q ":$1 " || nc -z 127.0.0.1 "$1" 2>/dev/null; }
+_port_in_use() { ss -ltn 2>/dev/null | grep -q ":$1 "; }
 
 _stop_gateway() {
     _info "Parando gateway OpenClaw …"
@@ -64,6 +66,7 @@ case "${1:-}" in
     --stop)    _load_env; _stop_gateway; exit 0 ;;
     --status)  _load_env; _status_gateway; exit 0 ;;
     --restart) _load_env; _stop_gateway; sleep 1; exec "$0" ;;
+    --expose)  GATEWAY_BIND="lan"; GATEWAY_PORT="$EXPOSE_PORT" ;;
     --logs)
         echo -e "\033[1;37m[CLAW] Logs em tempo real — Ctrl+C para sair\033[0m"
         trap 'echo -e "\n\033[0;36m[CLAW]\033[0m Logs encerrados. Gateway ainda rodando."; exit 0' INT
@@ -104,6 +107,9 @@ esac
 
 _load_env
 
+# Bind padrão (pode ser sobrescrito por --expose antes do _load_env)
+GATEWAY_BIND="${GATEWAY_BIND:-loopback}"
+
 # Verifica se setup já foi executado
 if [[ -z "${OPENCLAW_GATEWAY_TOKEN:-}" ]]; then
     _err "OPENCLAW_GATEWAY_TOKEN não definido."
@@ -138,13 +144,19 @@ fi
 mkdir -p /tmp/quanttix
 
 # Inicia gateway
-_info "Iniciando OpenClaw gateway na porta $GATEWAY_PORT …"
+if [[ "$GATEWAY_BIND" == "lan" ]]; then
+    _info "Iniciando OpenClaw gateway exposto na LAN — porta $GATEWAY_PORT …"
+    _warn "Canvas UI: https://\$(hostname -I | awk '{print \$1}'):$GATEWAY_PORT/__openclaw__/canvas/"
+    _warn "RunPod:    https://\${RUNPOD_POD_ID:-<pod-id>}-${GATEWAY_PORT}.proxy.runpod.net/__openclaw__/canvas/"
+else
+    _info "Iniciando OpenClaw gateway na porta $GATEWAY_PORT (loopback) …"
+fi
 export OPENCLAW_GATEWAY_TOKEN
 
 
 # shellcheck disable=SC2086
 nohup $RUN_CMD gateway run \
-    --bind loopback \
+    --bind "$GATEWAY_BIND" \
     --port "$GATEWAY_PORT" \
     --allow-unconfigured \
     > "$LOG_FILE" 2>&1 &
