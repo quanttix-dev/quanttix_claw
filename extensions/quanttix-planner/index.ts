@@ -46,7 +46,6 @@ export default definePluginEntry({
                 {
                   id: modelId,
                   name: "Gemma 4 E2B (Quanttix Planner)",
-                  reasoning: true,
                   input: ["text"] as ["text"],
                   cost: { input: 0, output: 0 },
                   contextWindow: 8192,
