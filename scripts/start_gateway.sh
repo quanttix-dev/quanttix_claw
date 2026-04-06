@@ -15,6 +15,8 @@ ENV_FILE="$REPO_ROOT/scripts/quanttix.env"
 OPENCLAW_BIN="$REPO_ROOT/openclaw.mjs"
 LOG_FILE="/tmp/quanttix/openclaw_gateway.log"
 PID_FILE="/tmp/quanttix/openclaw_gateway.pid"
+PROXY_PID_FILE="/tmp/quanttix/canvas_proxy.pid"
+PROXY_LOG="/tmp/quanttix/canvas_proxy.log"
 GATEWAY_PORT="${CLAW_GATEWAY_PORT:-18789}"
 EXPOSE_PORT="${CLAW_EXPOSE_PORT:-8888}"
 
@@ -45,8 +47,14 @@ _stop_gateway() {
         fi
         rm -f "$PID_FILE"
     fi
-    # Mata processos órfãos
+    # Para proxy canvas se rodando
+    if [[ -f "$PROXY_PID_FILE" ]]; then
+        PPID=$(cat "$PROXY_PID_FILE")
+        kill "$PPID" 2>/dev/null && _ok "Canvas proxy (PID $PPID) encerrado."
+        rm -f "$PROXY_PID_FILE"
+    fi
     pkill -f "openclaw.*gateway" 2>/dev/null || true
+    pkill -f "canvas-proxy.mjs" 2>/dev/null || true
     sleep 1
     _ok "Pronto."
 }
@@ -66,7 +74,7 @@ case "${1:-}" in
     --stop)    _load_env; _stop_gateway; exit 0 ;;
     --status)  _load_env; _status_gateway; exit 0 ;;
     --restart) _load_env; _stop_gateway; sleep 1; exec "$0" ;;
-    --expose)  GATEWAY_BIND="lan"; GATEWAY_PORT="$EXPOSE_PORT" ;;
+    --expose)  GATEWAY_EXPOSE="true" ;;
     --logs)
         echo -e "\033[1;37m[CLAW] Logs em tempo real — Ctrl+C para sair\033[0m"
         trap 'echo -e "\n\033[0;36m[CLAW]\033[0m Logs encerrados. Gateway ainda rodando."; exit 0' INT
@@ -107,8 +115,8 @@ esac
 
 _load_env
 
-# Bind padrão (pode ser sobrescrito por --expose antes do _load_env)
-GATEWAY_BIND="${GATEWAY_BIND:-loopback}"
+GATEWAY_BIND="loopback"
+GATEWAY_EXPOSE="${GATEWAY_EXPOSE:-false}"
 
 # Verifica se setup já foi executado
 if [[ -z "${OPENCLAW_GATEWAY_TOKEN:-}" ]]; then
@@ -143,20 +151,13 @@ fi
 # Cria dir de logs/pids
 mkdir -p /tmp/quanttix
 
-# Inicia gateway
-if [[ "$GATEWAY_BIND" == "lan" ]]; then
-    _info "Iniciando OpenClaw gateway exposto na LAN — porta $GATEWAY_PORT …"
-    _warn "Canvas UI: https://\$(hostname -I | awk '{print \$1}'):$GATEWAY_PORT/__openclaw__/canvas/"
-    _warn "RunPod:    https://\${RUNPOD_POD_ID:-<pod-id>}-${GATEWAY_PORT}.proxy.runpod.net/__openclaw__/canvas/"
-else
-    _info "Iniciando OpenClaw gateway na porta $GATEWAY_PORT (loopback) …"
-fi
+# Inicia gateway (sempre loopback)
+_info "Iniciando OpenClaw gateway na porta $GATEWAY_PORT (loopback) …"
 export OPENCLAW_GATEWAY_TOKEN
-
 
 # shellcheck disable=SC2086
 nohup $RUN_CMD gateway run \
-    --bind "$GATEWAY_BIND" \
+    --bind loopback \
     --port "$GATEWAY_PORT" \
     --allow-unconfigured \
     > "$LOG_FILE" 2>&1 &
@@ -174,8 +175,27 @@ for i in $(seq 1 15); do
     fi
     if _port_in_use "$GATEWAY_PORT"; then
         _ok "Gateway OpenClaw pronto na porta $GATEWAY_PORT (PID $GATEWAY_PID)"
-        exit 0
+        break
     fi
 done
 
-_warn "Gateway pode ainda estar inicializando — verifique: tail -f $LOG_FILE"
+if ! _port_in_use "$GATEWAY_PORT"; then
+    _warn "Gateway pode ainda estar inicializando — verifique: tail -f $LOG_FILE"
+fi
+
+# Inicia proxy canvas se --expose foi passado
+if [[ "$GATEWAY_EXPOSE" == "true" ]]; then
+    _info "Iniciando canvas proxy na porta $EXPOSE_PORT …"
+    export CLAW_GATEWAY_PORT="$GATEWAY_PORT"
+    export CANVAS_PROXY_PORT="$EXPOSE_PORT"
+    nohup node "$REPO_ROOT/scripts/canvas-proxy.mjs" > "$PROXY_LOG" 2>&1 &
+    PROXY_PID=$!
+    echo "$PROXY_PID" > "$PROXY_PID_FILE"
+    sleep 1
+    if kill -0 "$PROXY_PID" 2>/dev/null; then
+        _ok "Canvas proxy pronto (PID $PROXY_PID, porta $EXPOSE_PORT)"
+        _ok "Acesse: https://\${RUNPOD_POD_ID:-<pod-id>}-${EXPOSE_PORT}.proxy.runpod.net/__openclaw__/canvas/"
+    else
+        _err "Canvas proxy falhou. Log: $PROXY_LOG"
+    fi
+fi
