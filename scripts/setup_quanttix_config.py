@@ -16,7 +16,6 @@ import argparse
 import os
 import secrets
 import subprocess
-import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -92,11 +91,14 @@ def main() -> None:
     # Exporta token para que os comandos openclaw abaixo consigam autenticar
     os.environ["OPENCLAW_GATEWAY_TOKEN"] = token
 
-    # 4. Configura gateway.mode=local via CLI (best-effort — gateway não precisa estar rodando)
+    # 4. Configura gateway + plugin via CLI (best-effort — gateway não precisa estar rodando)
     print("\n[config] Aplicando configurações via openclaw config …")
+    plugin_dir = str(REPO_ROOT / "extensions" / "quanttix-planner")
     configs = [
         ("gateway.mode", "local"),
         ("gateway.bind", "loopback"),
+        # Carrega o plugin quanttix-planner via load paths
+        ("plugins.load.paths", f'["{plugin_dir}"]'),
     ]
     for key, value in configs:
         result = openclaw("config", "set", key, value, check=False)

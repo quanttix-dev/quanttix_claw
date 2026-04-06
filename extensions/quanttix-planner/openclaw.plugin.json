@@ -1,0 +1,24 @@
+{
+  "id": "quanttix-planner",
+  "name": "Quanttix Planner",
+  "description": "Gemma 4 E2B local planner via llama.cpp (porta 8091, OpenAI-compatible)",
+  "enabledByDefault": true,
+  "providers": ["quanttix-planner"],
+  "modelSupport": {
+    "modelPrefixes": ["gemma-4-e2b", "quanttix-planner/"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "baseUrl": {
+        "type": "string",
+        "description": "URL base do servidor llama.cpp do planner"
+      },
+      "modelId": {
+        "type": "string",
+        "description": "Model ID exposto pelo servidor llama.cpp"
+      }
+    }
+  }
+}

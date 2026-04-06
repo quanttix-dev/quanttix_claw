@@ -1,0 +1,10 @@
+{
+  "name": "@quanttix/openclaw-planner-provider",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Quanttix local planner provider — Gemma 4 E2B via llama.cpp (porta 8091)",
+  "type": "module",
+  "openclaw": {
+    "extensions": ["./index.ts"]
+  }
+}
