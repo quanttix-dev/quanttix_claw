@@ -2,14 +2,9 @@ import {
   definePluginEntry,
   type OpenClawPluginApi,
 } from "openclaw/plugin-sdk/plugin-entry";
-import { buildProviderReplayFamilyHooks } from "openclaw/plugin-sdk/provider-model-shared";
 
 const PROVIDER_ID = "quanttix-planner";
 const LOCAL_API_KEY = "local";
-
-const REPLAY_HOOKS = buildProviderReplayFamilyHooks({
-  family: "openai-compatible",
-});
 
 type QuanttixPlannerConfig = {
   baseUrl?: string;
@@ -70,8 +65,6 @@ export default definePluginEntry({
       }),
 
       shouldDeferSyntheticProfileAuth: () => true,
-
-      ...REPLAY_HOOKS,
     });
   },
 });

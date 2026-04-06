@@ -67,7 +67,32 @@ case "${1:-}" in
     --logs)
         echo -e "\033[1;37m[CLAW] Logs em tempo real — Ctrl+C para sair\033[0m"
         trap 'echo -e "\n\033[0;36m[CLAW]\033[0m Logs encerrados. Gateway ainda rodando."; exit 0' INT
-        tail -F "$LOG_FILE" 2>/dev/null
+        tail -n 50 -F "$LOG_FILE" 2>/dev/null | while IFS= read -r line; do
+            # Timestamp: 2026-04-06T01:43:05.530+00:00  → cinza
+            ts=$(echo "$line" | grep -oP '^\d{4}-\d{2}-\d{2}T[\d:.+]+')
+            rest="${line#"$ts"}"
+            ts_fmt="\033[2;37m${ts}\033[0m"  # cinza dim
+
+            # Colorir por categoria
+            case "$rest" in
+                *"failed"*|*"error"*|*"Error"*|*"ERROR"*)
+                    echo -e "${ts_fmt}\033[0;31m${rest}\033[0m" ;;  # vermelho
+                *"[plugins]"*)
+                    echo -e "${ts_fmt}\033[0;33m${rest}\033[0m" ;;  # amarelo
+                *"[gateway] ready"*)
+                    echo -e "${ts_fmt}\033[1;32m${rest}\033[0m" ;;  # verde bold
+                *"[gateway]"*)
+                    echo -e "${ts_fmt}\033[0;36m${rest}\033[0m" ;;  # ciano
+                *"[hooks]"*)
+                    echo -e "${ts_fmt}\033[0;32m${rest}\033[0m" ;;  # verde
+                *"[canvas]"*)
+                    echo -e "${ts_fmt}\033[0;35m${rest}\033[0m" ;;  # magenta
+                *"[heartbeat]"*|*"[health-monitor]"*)
+                    echo -e "${ts_fmt}\033[2;37m${rest}\033[0m" ;;  # cinza dim
+                *)
+                    echo -e "${ts_fmt}${rest}" ;;
+            esac
+        done
         exit 0
         ;;
 esac
