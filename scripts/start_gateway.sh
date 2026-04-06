@@ -123,6 +123,7 @@ export OPENCLAW_GATEWAY_TOKEN
 nohup $RUN_CMD gateway run \
     --bind loopback \
     --port "$GATEWAY_PORT" \
+    --allow-unconfigured \
     > "$LOG_FILE" 2>&1 &
 GATEWAY_PID=$!
 echo "$GATEWAY_PID" > "$PID_FILE"
