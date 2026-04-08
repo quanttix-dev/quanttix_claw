@@ -164,6 +164,16 @@ def main() -> None:
         default=os.environ.get("CLAW_CANVAS_ORIGIN", ""),
         help="URL de origem para Canvas UI (ex: https://POD_ID-8888.proxy.runpod.net)",
     )
+    parser.add_argument(
+        "--telegram-bot-token",
+        default=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
+        help="Token do Telegram Bot (@Quanttix_bot) para canais de negociação",
+    )
+    parser.add_argument(
+        "--telegram-test-chat",
+        default=os.environ.get("TELEGRAM_TEST_CHAT_ID", ""),
+        help="chat_id numérico do contato de teste no Telegram (obtenha via /getUpdates)",
+    )
     args = parser.parse_args()
 
     print("=== Configuração OpenClaw — Quanttix ===\n")
@@ -234,6 +244,8 @@ def main() -> None:
         # Gateway
         ("gateway.mode", "local"),
         ("gateway.bind", "loopback"),
+        # Token para CLI conectar ao gateway via WebSocket
+        ("gateway.remote.token", token),
         # Control UI — permite acesso externo via proxy
         ("gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback", "true"),
         # Plugins
@@ -250,12 +262,35 @@ def main() -> None:
             f'["{canvas_origin}"]',
         ))
 
+    # Adiciona configuração Telegram se token presente
+    telegram_bot_token = args.telegram_bot_token or env.get("TELEGRAM_BOT_TOKEN", "")
+    telegram_test_chat = args.telegram_test_chat or env.get("TELEGRAM_TEST_CHAT_ID", "")
+
+    if telegram_bot_token:
+        configs.extend([
+            ("channels.telegram.botToken", telegram_bot_token),
+            ("channels.telegram.accounts.default.dmPolicy", "allowlist"),
+        ])
+        if telegram_test_chat:
+            configs.append(("channels.telegram.accounts.default.allowFrom", f'["{telegram_test_chat}"]'))
+        print(f"\n[telegram] Token configurado: {telegram_bot_token[:12]}…")
+        if telegram_test_chat:
+            print(f"[telegram] allowFrom: [{telegram_test_chat}]")
+    else:
+        print("\n[telegram] Token não fornecido — canal Telegram não configurado")
+        print("           Passe --telegram-bot-token ou defina TELEGRAM_BOT_TOKEN")
+
     for key, value in configs:
         result = openclaw("config", "set", key, value, check=False)
         status = "OK" if result.returncode == 0 else f"aviso ({result.stderr.strip()[:80]})"
-        print(f"  {key}={value} → {status}")
+        print(f"  {key}={value[:60]}{'…' if len(value) > 60 else ''} → {status}")
 
     # 6. Salva env
+    if telegram_bot_token:
+        env["TELEGRAM_BOT_TOKEN"]  = telegram_bot_token
+    if telegram_test_chat:
+        env["TELEGRAM_TEST_CHAT_ID"] = telegram_test_chat
+
     save_env(env)
 
     print("\n[pronto] Para subir o gateway:")
