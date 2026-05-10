@@ -1,0 +1,57 @@
+# policy.draft.yaml
+# Politica de negociacao - DRAFT inicial v0.1
+# Criado: 2026-05-10
+#
+# Seed acordado para a v0 do agente:
+#   - Desconto maximo: 10% (AR e AP)
+#   - Sem parcelamento (max_parcelas = 1)
+#   - Escalacao humana acima de 7% de desconto
+#
+# Quando o Estagio 1 do PLAN.md for implementado, a engine de validacao
+# carrega este YAML, valida com Pydantic v2, e expoe via tool MCP
+# get_negotiation_policy(). O schema pode evoluir; os valores aqui sao
+# a baseline que o agente respeita ate decisao em contrario.
+
+version: "0.1-draft"
+tenant_id: null  # null = global; reservado para multi-tenant
+
+rules:
+  # ====================================================================
+  # Accounts Receivable - cobranca de cliente
+  # ====================================================================
+  - id: "AR-default"
+    descricao: "Regra padrao para titulos a receber"
+    tipo_titulo: "AR"
+    tier: null              # qualquer tier
+    valor_min: 0.00
+    valor_max: null         # sem teto
+    max_desconto_pct: 10.0
+    max_parcelas: 1         # sem parcelamento nesta versao
+    max_prazo_dias_extra: 30
+    juros_mensal_min_pct: 0.0
+    escalation_threshold_pct: 7.0   # acima disso pede aprovacao humana
+    bloqueio_score_min: 300         # cliente com score < 300 nao negocia
+    bloqueio_em_protesto: true      # cliente em protesto nao negocia
+
+  # ====================================================================
+  # Accounts Payable - negociacao com fornecedor
+  # ====================================================================
+  - id: "AP-default"
+    descricao: "Regra padrao para titulos a pagar"
+    tipo_titulo: "AP"
+    tier: null
+    valor_min: 0.00
+    valor_max: null
+    max_desconto_pct: 10.0      # desconto que pedimos ao fornecedor
+    max_parcelas: 1
+    max_prazo_dias_extra: 30    # extensao de prazo que podemos pedir
+    juros_mensal_min_pct: 0.0
+    escalation_threshold_pct: 7.0
+    bloqueio_score_min: 0       # AP nao bloqueia por score (nos pagamos)
+    bloqueio_em_protesto: false # AP nao bloqueia por protesto
+
+defaults:
+  expiracao_proposta_horas: 48
+  max_propostas_por_dia_por_contraparte: 3
+  max_negociacoes_simultaneas_global: 100
+  rodada_maxima: 5            # apos 5 trocas, escala pra humano

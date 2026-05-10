@@ -1,0 +1,98 @@
+# Agente Autônomo de Negociação — Quanttix
+
+Plano de implementação do agente conversacional autônomo de negociação que
+roda dentro do `quanttix_claw` (fork OpenClaw), integrado com
+`quanttix_backend` (MCP + dispatch + guardrails) e o pipeline de simulação
+CNAB em `quanttix_data_eng`.
+
+## Arquivos nesta pasta
+
+- `PLAN.md` — Plano dividido em 8 estágios com subtarefas marcáveis.
+  Atualizar checkbox a cada subtarefa concluída. **Fonte de verdade.**
+- `README.md` — este arquivo. Navegação e instruções de retomada.
+
+## Visão de uma frase
+
+Transformar o OpenClaw num agente conversacional autônomo capaz de negociar
+títulos AR/AP via Telegram, dentro de guardrails determinísticos, gravando
+eventos no data lake e disparando o pipeline de cobrança simulada.
+
+## Arquitetura
+
+```
+                       INTERNO                                  EXTERNO
+
++----------+     +-----------------+     +-----------------+     +----------------+
+| Frontend | --> | quanttix_ai     | --> | quanttix_claw   | <-> | Contraparte    |
+| (gestor) | <-- | (orquestrador,  |hand-| (agente autono, |  TG | (cliente/forn) |
++----------+     |  Qwen3-32B)     |off  |  Gemma 4 E2B)   |     +----------------+
+   @Quanttix_bot +--------+--------+     +--------+--------+
+                          |                       |        @Quanttix_Negotiator_bot
+                          | MCP                   | MCP
+                          v                       v
+                  +---------------------------------------+
+                  | quanttix_backend                      |
+                  | (FastAPI + /mcp + /simulation/dispatch|
+                  |  + guardrails + audit parcimonioso)   |
+                  +-------------------+-------------------+
+                                      |
+                                      v
+                  +---------------------------------------+
+                  | quanttix_data_eng                     |
+                  | (Airflow DAGs sim_* + Iceberg lake)   |
+                  +---------------------------------------+
+
+Bots Telegram (dois, com funcoes distintas):
+  @Quanttix_bot            -> canal INTERNO  (quanttix_ai <-> gestor)
+  @Quanttix_Negotiator_bot -> canal EXTERNO  (quanttix_claw <-> contraparte)
+```
+
+## Repositórios envolvidos
+
+| Repo | Branch | O que muda |
+|---|---|---|
+| `quanttix_claw` | `developer` | Extension `quanttix-negotiation`, skill, policy, allowlist hooks |
+| `quanttix_backend` | `agentic_flow_cnab` | MCP server, dispatch endpoint, guardrails, audit trail |
+| `quanttix_ai` | `developer_cpp` | `NegotiationOrchestrator` vira fallback (não é mais primário) |
+| `quanttix_data_eng` | `developer_flow` | Já contém DAGs `sim_*` — sem mudanças nesta fase |
+
+## Como retomar este plano
+
+Se a sessão atual for interrompida (créditos, troca de conta, novo dia):
+
+1. Abra `PLAN.md` neste diretório.
+2. Procure pela primeira subtarefa não marcada (`- [ ]`).
+3. Verifique o "Critério de aceite" do estágio dela.
+4. Implemente **apenas essa subtarefa**.
+5. Marque `- [x]` e atualize o **Status** do estágio se mudou
+   (NÃO INICIADO → EM ANDAMENTO → CONCLUÍDO).
+6. Commit com mensagem: `negotiation-agent: stage-N <nome-curto-da-subtarefa>`.
+
+**Regras importantes ao retomar:**
+
+- Não pule estágios. A ordem é dependência real, não preferência.
+- Estágio 1 (Policy) bloqueia 2, 3, 4, 5. Não tente codar a skill antes da policy estar pronta.
+- Estágio 6 (Dispatch endpoint) bloqueia o fechamento real do ciclo de boleto.
+- Se uma subtarefa estiver mal definida, prefira atualizar o PLAN.md primeiro (com nota explicando) antes de codar.
+- Mudanças de contrato (assinatura de tool MCP, payload do dispatch) precisam atualizar a seção "Contratos" do estágio antes de implementar.
+
+## Convenções de status
+
+No PLAN.md cada estágio tem um campo **Status** com três valores:
+
+- `NÃO INICIADO` — nenhuma subtarefa concluída
+- `EM ANDAMENTO` — pelo menos uma subtarefa concluída, mas há subtarefas pendentes
+- `CONCLUÍDO` — todas as subtarefas marcadas E critério de aceite verificado
+
+## Pré-requisitos antes de começar a codar
+
+- [ ] Os 3 repos commitados (estado atual tem mudanças não commitadas — ver
+      conversa anterior). Confirmar com o usuário antes de iniciar Estágio 1.
+- [ ] Definir se Telegram bot do agente é o **mesmo** ou **diferente** do
+      bot do `quanttix_ai`. Decisão de arquitetura, não código.
+- [ ] Confirmar onde o MCP server vai rodar (processo separado vs embarcado
+      no FastAPI do backend). Recomendação: embarcado, rota `/mcp` no backend.
+
+---
+
+Versão inicial do plano: 2026-05-10.
