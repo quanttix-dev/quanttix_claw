@@ -26,12 +26,22 @@ _ok()    { echo -e "\033[0;32m[CLAW]\033[0m  $*"; }
 _warn()  { echo -e "\033[0;33m[CLAW]\033[0m  $*"; }
 _err()   { echo -e "\033[0;31m[CLAW]\033[0m  $*" >&2; }
 
-# Carrega quanttix.env se existir
+# Carrega quanttix.env sem executar como shell — suporta tokens com @, ^, !, $, etc.
 _load_env() {
-    if [[ -f "$ENV_FILE" ]]; then
-        # shellcheck disable=SC1090
-        set -a; source "$ENV_FILE"; set +a
-    fi
+    [[ -f "$ENV_FILE" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line// }" ]]           && continue
+        local key="${line%%=*}"
+        local val="${line#*=}"
+        key="${key// /}"
+        if [[ "$val" =~ ^\"(.*)\"$ ]]; then
+            val="${BASH_REMATCH[1]}"
+        elif [[ "$val" =~ ^\'(.*)\'$ ]]; then
+            val="${BASH_REMATCH[1]}"
+        fi
+        [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && export "$key=$val"
+    done < "$ENV_FILE"
 }
 
 _port_in_use() { ss -ltn 2>/dev/null | grep -q ":$1 "; }
