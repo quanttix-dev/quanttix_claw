@@ -13,11 +13,11 @@
 |---|---|---|
 | 1 | Política de Negociação (Playbook) | NÃO INICIADO |
 | 2 | Skill / Persona do Agente | NÃO INICIADO |
-| 3 | MCP Server — Tools de leitura | NÃO INICIADO |
+| 3 | Endpoints REST — Tools de leitura | NÃO INICIADO |
 | 4 | Guardrails — validação determinística | NÃO INICIADO |
-| 5 | MCP Server — Tools de escrita + audit | NÃO INICIADO |
+| 5 | Endpoints REST — Tools de escrita + audit | NÃO INICIADO |
 | 6 | Backend Dispatch Endpoint (SSE) | NÃO INICIADO |
-| 7 | Session binding (Redis compartilhado) | NÃO INICIADO |
+| 7 | Handoff (HTTP localhost) + Session binding (Redis) | NÃO INICIADO |
 | 8 | Allowlist dinâmica Telegram + testes E2E | NÃO INICIADO |
 
 ---
@@ -149,7 +149,7 @@ system prompt; o policy.yaml entra como contexto dinâmico via tool.
 
 ---
 
-## Estágio 3: MCP Server — Tools de leitura
+## Estágio 3: Endpoints REST — Tools de leitura
 
 **Repo**: `quanttix_backend`
 **Bloqueia**: Estágios 5, 8
@@ -157,43 +157,46 @@ system prompt; o policy.yaml entra como contexto dinâmico via tool.
 **Status**: NÃO INICIADO
 
 ### Objetivo
-Expor as capacidades de **consulta** ao agente via MCP (Model Context Protocol).
-O agente chama essas tools para montar contexto antes de propor termos.
-Sem efeitos colaterais — apenas leitura.
+Expor as capacidades de **consulta** ao agente como endpoints REST
+no router existente do backend. Tanto `quanttix_ai` quanto `quanttix_claw`
+consomem via HTTPS + JWT (mesmo padrão já usado em
+`quanttix_api_client.py`). Sem efeitos colaterais — apenas leitura.
+
+### Por que REST (e não MCP)
+Topologia atual: backend roda em private network (VPC), `quanttix_ai` e
+`quanttix_claw` rodam juntos no Server X (POD com GPUs). A comunicação
+cross-zone já passa por HTTPS + JWT service account. Adicionar MCP
+acrescenta protocolo sem ganho de segurança e duplica a stack. Mantemos
+REST (Django Ninja, mesmo padrão dos endpoints `treasury/api_*`).
 
 ### Entregáveis
-- `src/mcp/server.py` (FastMCP ou implementação manual)
-- `src/mcp/tools/read/get_title.py`
-- `src/mcp/tools/read/get_counterpart_profile.py`
-- `src/mcp/tools/read/get_negotiation_policy.py`
-- `src/mcp/tools/read/get_open_negotiations.py`
-- `src/mcp/tools/read/__init__.py` (registry)
-- `tests/mcp/test_read_tools.py`
-- `src/main.py` (montar rota `/mcp` na FastAPI app)
+- `src/treasury/api_negotiation.py` (router Ninja, rotas read)
+- `src/treasury/services/negotiation_service.py` (queries)
+- `src/treasury/schemas/negotiation.py` (Pydantic responses)
+- `tests/treasury/test_api_negotiation_read.py`
 
 ### Subtarefas
-- [ ] Escolher framework MCP: FastMCP (mais simples) vs implementação manual
-      sobre stdio/SSE — recomendação: FastMCP via SSE para integrar com OpenClaw
-- [ ] Definir transport: SSE em `/mcp` (compatível com mcporter do OpenClaw)
-- [ ] Tool `get_title(title_id: str) -> TitleDetails`
-- [ ] Tool `get_counterpart_profile(documento: str) -> CounterpartProfile`
-- [ ] Tool `get_negotiation_policy(title_id: str, counterpart_doc: str) -> PolicyDecision`
-      (chama policy engine do Estágio 1 — copiar lib pro backend ou importar como pacote)
-- [ ] Tool `get_open_negotiations(counterpart_doc: str) -> list[OpenNegotiation]`
-      (lê de `quanttix.simulation.negociacao.evento`)
-- [ ] Autenticação MCP — modelo de segurança restritivo:
-  - Bearer token por cliente: `MCP_TOKEN_QUANTTIX_AI`, `MCP_TOKEN_QUANTTIX_CLAW`
-  - Middleware FastAPI valida `Authorization: Bearer <token>` e mapeia para
-    `client_id` que vai no log de toda chamada (audit operacional)
-  - IP allowlist por env: `MCP_ALLOWED_IPS` (CIDR list); recusar fora dela
-  - Tokens rotacionáveis sem deploy (carregar de Redis no startup, fallback env)
-  - Requisição sem token → 401 (não 403 — esconder existência da rota)
-  - Rate limit por `client_id` independente do rate limit por contraparte
-  - Documentar em `docs/mcp/security.md` o threat model e o que NÃO está protegido
-- [ ] Schemas Pydantic para responses (todas as tools)
-- [ ] Teste de cada tool com mock do storage
-- [ ] Teste de integração: chamar tool via cliente MCP real (OpenClaw)
-- [ ] Documentar tools em `docs/mcp/tools.md`
+- [ ] Criar router `api_negotiation.py` mountado em
+      `/api/v1/tesouraria/negotiation/` (segue convenção de `api_cnab.py`)
+- [ ] Endpoint `GET /titles/{title_id}` → `TitleDetails`
+- [ ] Endpoint `GET /counterparts/{documento}` → `CounterpartProfile`
+- [ ] Endpoint `GET /policy?title_id&counterpart_doc` → `PolicyDecision`
+      (chama policy engine do Estágio 1 — importa do pacote
+      `extensions/quanttix-negotiation/policy/` ou copia como lib)
+- [ ] Endpoint `GET /open-negotiations?counterpart_doc=...` →
+      `list[OpenNegotiation]` (lê de `quanttix.simulation.negociacao.evento`)
+- [ ] Autenticação — modelo restritivo:
+  - JWT service account (já existe `_extract_tenant_context` em `treasury/api.py`)
+  - Tokens distintos por cliente: contas `svc_quanttix_ai` e
+    `svc_quanttix_claw` com permissões mínimas (leitura nos endpoints
+    de negociation + escrita no Estágio 5)
+  - Log de toda chamada com `client_id` (audit operacional via Redis,
+    Estágio 4) — recurso já existe via `_get_client_ip` + tenant context
+  - Rate limit por `client_id` (separado do rate limit por contraparte)
+- [ ] Schemas Pydantic alinhados com os contratos abaixo
+- [ ] Teste por endpoint com fixture de DB
+- [ ] Teste de integração: `httpx.AsyncClient` autenticado via JWT
+- [ ] Documentar endpoints em `docs/api/negotiation.md` + OpenAPI auto-gen
 
 ### Contratos das tools
 
@@ -232,17 +235,20 @@ class OpenNegotiation(BaseModel):
 ```
 
 ### Critério de aceite
-- `pytest tests/mcp/test_read_tools.py` passa
-- Iniciar o backend e chamar `curl http://localhost:8000/mcp/tools` lista as 4 tools
-- OpenClaw via mcporter consegue listar e invocar as tools
-- Latência de cada tool < 300ms em ambiente de dev
+- `pytest tests/treasury/test_api_negotiation_read.py` passa
+- OpenAPI lista os 4 endpoints em `/api/v1/docs`
+- Chamar via `quanttix_api_client.py` autenticado funciona (smoke test)
+- Latência de cada endpoint < 300ms em ambiente de dev
 
 ### Notas de implementação
-- Para `get_title` e `get_counterpart_profile`, a fonte primária são as
-  tabelas Iceberg via Trino (já existe `quanttix_backend/src/treasury/`)
+- Para `GET /titles/{id}` e `GET /counterparts/{doc}`, fonte primária são
+  as tabelas Iceberg via Trino (já existe acesso em `src/treasury/`)
 - Cuidado com cache: dados de título mudam (juros calculados na hora)
-- `get_open_negotiations` lê de `quanttix.simulation.negociacao.evento`
+- `GET /open-negotiations` lê de `quanttix.simulation.negociacao.evento`
   e agrega por `negociacao_id` (último evento vence)
+- O cliente do lado `quanttix_ai` estende `quanttix_api_client.py`;
+  o cliente do lado `quanttix_claw` é um plugin TS novo
+  (`extensions/quanttix-negotiation/src/client.ts`) usando `fetch`+JWT
 
 ---
 
@@ -261,12 +267,12 @@ operacional vai pro Redis (TTL curto), só evento material vai pro Iceberg —
 e mesmo assim ANEXADO ao evento de negociação existente, sem tabela nova.
 
 ### Entregáveis
-- `src/mcp/guardrails/policy_check.py`
-- `src/mcp/guardrails/rate_limit.py`
-- `src/mcp/guardrails/audit_ops.py` (Redis transient, TTL 7d)
-- `src/mcp/guardrails/audit_event.py` (anexa colunas ao evento de negociação)
-- `src/mcp/guardrails/__init__.py` (decorador `@guardrail`)
-- `tests/mcp/test_guardrails.py`
+- `src/treasury/services/guardrails/policy_check.py`
+- `src/treasury/services/guardrails/rate_limit.py`
+- `src/treasury/services/guardrails/audit_ops.py` (Redis transient, TTL 7d)
+- `src/treasury/services/guardrails/audit_event.py` (anexa colunas ao evento)
+- `src/treasury/services/guardrails/__init__.py` (decorador `@guardrail`)
+- `tests/treasury/test_guardrails.py`
 
 ### Subtarefas
 - [ ] Decorador `@guardrail(rules=[...])` para envolver tools de escrita
@@ -322,7 +328,7 @@ INVALID_STATE          — operação não cabe no estado atual da negociação
 
 ---
 
-## Estágio 5: MCP Server — Tools de escrita + audit
+## Estágio 5: Endpoints REST — Tools de escrita + audit
 
 **Repo**: `quanttix_backend`
 **Bloqueia**: Estágio 6 (parcial)
@@ -330,38 +336,37 @@ INVALID_STATE          — operação não cabe no estado atual da negociação
 **Status**: NÃO INICIADO
 
 ### Objetivo
-Expor as **ações** do agente: propor termos, registrar contraproposta,
-aceitar, recusar, escalar. Cada uma envelopada pelo guardrail e gera
-evento em `quanttix.simulation.negociacao.evento`.
+Expor as **ações** do agente como endpoints REST POST: propor termos,
+registrar contraproposta, aceitar, recusar, escalar. Cada um envelopado
+pelo guardrail (Estágio 4) e gera evento em
+`quanttix.simulation.negociacao.evento`.
 
 ### Entregáveis
-- `src/mcp/tools/write/propose_negotiation.py`
-- `src/mcp/tools/write/record_counterproposal.py`
-- `src/mcp/tools/write/accept_negotiation.py`
-- `src/mcp/tools/write/reject_negotiation.py`
-- `src/mcp/tools/write/escalate_to_human.py`
-- `src/mcp/tools/write/__init__.py`
-- `tests/mcp/test_write_tools.py`
+- Adicionar rotas POST em `src/treasury/api_negotiation.py`
+  (mesmo router do Estágio 3, agora com endpoints write)
+- `src/treasury/services/negotiation_service.py` ganha métodos de escrita
+- `src/treasury/schemas/negotiation.py` ganha request/response schemas
+- `tests/treasury/test_api_negotiation_write.py`
 
 ### Subtarefas
-- [ ] Tool `propose_negotiation(title_id, terms) -> NegotiationEvent`
-      grava com status `PROPOSTA`
-- [ ] Tool `record_counterproposal(negociacao_id, terms) -> NegotiationEvent`
-      grava status `CONTRAPROPOSTA`, valida que existe `PROPOSTA` prévia
-- [ ] Tool `accept_negotiation(negociacao_id) -> AcceptResult`
-      grava `ACEITA` e retorna sinal para o agente saber que dispatch
-      do boleto pode ser chamado (Estágio 6 conecta o dispatch)
-- [ ] Tool `reject_negotiation(negociacao_id, reason) -> NegotiationEvent`
-      grava `RECUSADA` com motivo
-- [ ] Tool `escalate_to_human(negociacao_id, reason, context) -> EscalationTicket`
-      cria entrada em fila de aprovação humana (canal interno de supervisão)
-- [ ] Todas envelopadas com `@guardrail` (Estágio 4)
-- [ ] Escrita idempotente: chamar `propose` 2x com mesmo `idempotency_key`
-      não duplica evento
-- [ ] Teste por tool: caminho feliz
-- [ ] Teste por tool: bloqueado por guardrail
+- [ ] `POST /negotiation/propose` body `{title_id, terms}` →
+      `NegotiationEvent` (status `PROPOSTA`)
+- [ ] `POST /negotiation/{neg_id}/counterproposal` →
+      status `CONTRAPROPOSTA`; valida que existe `PROPOSTA` prévia
+- [ ] `POST /negotiation/{neg_id}/accept` → `AcceptResult` (`ACEITA`);
+      retorna sinal pro agente saber que dispatch do boleto pode ser
+      chamado (Estágio 6 conecta o dispatch)
+- [ ] `POST /negotiation/{neg_id}/reject` body `{reason}` →
+      `NegotiationEvent` (status `RECUSADA`)
+- [ ] `POST /negotiation/{neg_id}/escalate` body `{reason, context}` →
+      `EscalationTicket` (cria entrada em fila de aprovação humana)
+- [ ] Todos os 5 endpoints envelopados com `@guardrail` (Estágio 4)
+- [ ] Idempotência via header `Idempotency-Key`: 2 chamadas com mesma
+      key não duplicam evento
+- [ ] Teste por endpoint: caminho feliz
+- [ ] Teste por endpoint: bloqueado por guardrail (POLICY_VIOLATION etc.)
 - [ ] Teste: idempotência
-- [ ] Teste: state machine consistency (accept antes de propose falha)
+- [ ] Teste: state machine (accept antes de propose retorna 409)
 
 ### Contratos
 
@@ -481,78 +486,73 @@ X-Tenant-Id: <tenant>
 
 ---
 
-## Estágio 7: Handoff API + Session binding (Redis compartilhado)
+## Estágio 7: Handoff (HTTP localhost) + Session binding (Redis)
 
-**Repo**: `quanttix_claw` + `quanttix_backend` + `quanttix_ai`
+**Repo**: `quanttix_claw` + `quanttix_ai`
 **Bloqueia**: Estágio 8
 **Depende de**: Estágios 5 e 6
 **Status**: NÃO INICIADO
 
 ### Objetivo
-Dois sub-problemas conectados:
+Dois sub-problemas conectados, simplificados pela topologia (AI e Claw
+no mesmo Server X):
 
-1. **Handoff**: o `quanttix_ai` (orquestrador interno) decide iniciar
-   negociação de um título → entrega ao `quanttix_claw` (agente externo)
-   com contexto completo + `chat_id` de destino. Substitui o caminho
-   antigo onde o `quanttix_ai` falava direto com o contraparte via
-   Telegram (a "versão pobre" referida pelo usuário).
+1. **Handoff**: `quanttix_ai` decide iniciar negociação de um título →
+   chama o `quanttix_claw` via **HTTP POST localhost** com contexto
+   completo + `chat_id` de destino. Substitui o caminho antigo onde
+   `quanttix_ai` falava direto via Telegram com o contraparte (versão
+   "pobre" referida pelo usuário).
 
-2. **Session binding**: o `quanttix_claw` mantém `chat_id ↔ negociacao_id`
-   no Redis para que cada resposta do contraparte seja interpretada no
-   contexto certo (qual título, qual rodada, qual última proposta).
+2. **Session binding**: `quanttix_claw` mantém `chat_id ↔ negociacao_id`
+   no Redis (local ao Server X) para que cada resposta do contraparte
+   seja interpretada no contexto certo (qual título, qual rodada, qual
+   última proposta).
+
+### Por que HTTP localhost (e não Redis pub/sub)
+AI e Claw rodam no mesmo servidor. Chamada direta `localhost:18789`
+é trivial (latência microsegundos), síncrona, simples de depurar e
+não exige listener no Claw nem broker pra fanout. Redis fica só pra
+state compartilhado.
 
 ### Entregáveis
-- `quanttix_ai/llm_api/services/handoff_client.py` (cliente que chama claw)
-- `extensions/quanttix-negotiation/src/handoff_listener.ts` (escuta pub/sub)
+- `quanttix_ai/llm_api/services/handoff_client.py` (httpx client localhost)
+- `extensions/quanttix-negotiation/src/handoff_endpoint.ts`
+  (HTTP handler exposto pelo OpenClaw gateway)
 - `extensions/quanttix-negotiation/src/session_binding.ts` (lookup pre-LLM)
-- `src/mcp/tools/write/request_negotiation_start.py` (backend, ponte)
-- `src/mcp/tools/read/get_active_negotiation_for_chat.py` (backend)
-- `src/mcp/tools/write/bind_chat_to_negotiation.py` (backend)
-- `src/mcp/tools/write/unbind_chat.py` (backend)
+- `extensions/quanttix-negotiation/src/redis_client.ts` (compartilhado)
 - `tests/integration/test_handoff_flow.py`
 
 ### Subtarefas
 - [ ] Definir contrato do handoff (ver "Contrato — Handoff" abaixo)
-- [ ] Decidir mecanismo de transporte do handoff:
-  - opção A: HTTP POST direto do `quanttix_ai` → endpoint REST no claw
-    (precisa de gateway HTTP custom dentro do OpenClaw)
-  - opção B: `quanttix_ai` grava em canal Redis pub/sub
-    `negotiation:start`; extensão claw escuta e age
-  - opção C: tool MCP `request_negotiation_start` chamada pelo
-    `quanttix_ai` contra o backend; o backend publica no Redis;
-    claw escuta o mesmo canal
-  - **Recomendação**: opção C — passa pelo MCP, mantém o backend como
-    hub central, centraliza auth + audit, evita acoplamento direto
-- [ ] Implementar tool MCP `request_negotiation_start(title_id,
-      counterpart_doc, channel, chat_id, instructions?)` no backend
-      (valida com guardrail antes de publicar)
-- [ ] Implementar `handoff_listener.ts` no extension — subscreve canal
-      Redis `negotiation:start` e dispara a primeira mensagem ao contraparte
-- [ ] Ao receber evento: criar binding (`bind_chat_to_negotiation`),
-      buscar contexto via MCP (title + counterpart + policy), enviar
-      primeira mensagem via canal Telegram do OpenClaw
-- [ ] Layout de chaves Redis:
+- [ ] Implementar `handoff_endpoint.ts` no extension —
+      `POST http://localhost:18789/negotiation/start` recebe payload e:
+      1. valida bearer token (compartilhado localhost only, low-risk)
+      2. cria binding `chat_id ↔ negociacao_id` no Redis
+      3. busca contexto via REST tools (Estágio 3) para enriquecer prompt
+      4. envia primeira mensagem ao contraparte via canal Telegram OpenClaw
+- [ ] Implementar `handoff_client.py` no `quanttix_ai` —
+      httpx POST contra `http://localhost:18789/negotiation/start`,
+      retry com backoff em caso de 5xx
+- [ ] Layout de chaves Redis (local ao Server X):
   - `chat:tg:{chat_id} → {negociacao_id, counterpart_doc, bound_at}`
   - `negociacao:{negociacao_id}:chat → {channel, chat_id}`
-  - canal pub/sub `negotiation:start` (handoff de entrada)
-  - canal pub/sub `negotiation:end:{negociacao_id}` (encerramento)
-- [ ] Tool MCP `bind_chat_to_negotiation(chat_id, negociacao_id, counterpart_doc)`
-- [ ] Tool MCP `get_active_negotiation_for_chat(chat_id) -> NegotiationContext | None`
-- [ ] Tool MCP `unbind_chat(chat_id, reason)` (no fechamento da negociação)
-- [ ] Hook OpenClaw pre-LLM — em toda mensagem nova, busca contexto via
-      `get_active_negotiation_for_chat` e injeta no system prompt
-- [ ] TTL: binding expira em 7 dias se sem atividade
-- [ ] **Migração do `quanttix_ai`**: a função `start_negotiation()` do
+  - `lock:chat:{chat_id}` (TTL 5s, evita race de mensagens em paralelo)
+- [ ] Hook OpenClaw pre-LLM em `session_binding.ts` — antes de invocar o
+      LLM em mensagem nova, lê `chat:tg:{chat_id}` do Redis e injeta
+      contexto no system prompt (negociacao_id, título, policy, etc.)
+- [ ] TTL do binding: 7 dias com renovação a cada mensagem
+- [ ] Encerramento: ao receber status terminal (ACEITA/RECUSADA/EXPIRADA),
+      limpar `chat:tg:{chat_id}` e `negociacao:{neg_id}:chat`
+- [ ] **Migração do `quanttix_ai`**: `start_negotiation()` do
       `NegotiationOrchestrator` muda — em vez de chamar `TelegramService`
-      direto, chama `handoff_client.request_start()` que internamente
-      invoca a tool MCP `request_negotiation_start`. Manter o caminho
+      direto, chama `handoff_client.request_start()`. Manter o caminho
       antigo atrás de flag `USE_LEGACY_NEGOTIATION=true` por uma versão
-      para rollback rápido
-- [ ] Teste: bind cria as duas chaves Redis consistentes
-- [ ] Teste: get retorna None para chat não vinculado
+      pra rollback rápido
+- [ ] Teste: binding cria as duas chaves Redis consistentes
+- [ ] Teste: hook retorna `None` para chat não vinculado
 - [ ] Teste E2E handoff: `quanttix_ai` dispara → claw recebe → manda 1ª msg
 - [ ] Teste: TTL renova ao chegar nova mensagem do contraparte
-- [ ] Teste: unbind quando negociação fecha (status terminal)
+- [ ] Teste: encerramento limpa as chaves
 - [ ] Teste: flag legacy desliga handoff novo e usa caminho antigo
 
 ### Contrato — Handoff payload
@@ -589,11 +589,15 @@ Dois sub-problemas conectados:
   COMPLEMENTAR — "memória de negócio" ≠ "memória de conversa"
 - Race condition: 2 mensagens do mesmo chat em <1s — usar lock distribuído
   no Redis (chave `lock:chat:{chat_id}`, TTL 5s) ou aceitar best-effort
-  com idempotency_key
-- O `quanttix_ai` **NÃO** chama mais a Telegram API direto após esta etapa
+- `quanttix_ai` **não** chama mais a Telegram API direto após esta etapa
   — todo tráfego com contraparte passa pelo claw
-- O `NegotiationOrchestrator` antigo do `quanttix_ai` vira fallback,
+- `NegotiationOrchestrator` antigo do `quanttix_ai` vira fallback,
   não primário
+- O endpoint `handoff_endpoint.ts` é exposto apenas em `127.0.0.1` no
+  Server X — não precisa de TLS nem allowlist IP, só bearer token
+  compartilhado por env (`QUANTTIX_HANDOFF_TOKEN`)
+- Comunicação entre AI e Claw NÃO passa pelo backend; o backend só é
+  envolvido nas tools (REST + JWT) e no dispatch (Estágio 6)
 
 ---
 
@@ -660,13 +664,21 @@ ao encerrar, sai.
      fala diretamente com o contraparte (cliente/fornecedor). É o agente
      autônomo deste plano.
    - **Fluxo**: Frontend → `quanttix_ai` (orquestrador, seleção do título)
-     → handoff via MCP → `quanttix_claw` (conduz a negociação real).
+     → handoff via HTTP localhost → `quanttix_claw` (conduz a negociação).
    - Detalhe do handoff: Estágio 7.
 
-2. **MCP server — embarcado no FastAPI do backend, rota `/mcp`.**
-   - Auth obrigatória: bearer token por cliente + IP allowlist.
-   - Clientes autorizados: apenas `quanttix_ai` e `quanttix_claw`.
-   - Subtarefa específica de implementação de auth está no Estágio 3.
+2. **Transporte — REST + JWT (MCP descartado).**
+   - Decisão baseada na topologia: backend roda em private network,
+     `quanttix_ai` e `quanttix_claw` rodam no mesmo Server X.
+   - Tools de leitura e escrita do agente são endpoints REST no router
+     `src/treasury/api_negotiation.py` (mesma convenção dos demais
+     `api_*` do treasury), autenticados por JWT service account.
+   - Handoff AI → Claw é **HTTP POST localhost** (Estágio 7), sem
+     intermediário, sem broker. Latência mínima, debug trivial.
+   - MCP foi avaliado e descartado: acrescenta protocolo sem ganho de
+     segurança (a barreira é a mesma: JWT + TLS pro backend, localhost
+     pro handoff). Pode ser reavaliado em v2 se uma terceira LLM externa
+     entrar na pilha.
 
 3. **Policy YAML — global, com `tenant_id` reservado.**
    - Draft inicial criado em `policy.draft.yaml` (nesta pasta):

@@ -20,29 +20,41 @@ eventos no data lake e disparando o pipeline de cobrança simulada.
 ## Arquitetura
 
 ```
-                       INTERNO                                  EXTERNO
++========================================+      +========================================+
+|  Server X (POD com GPUs)               |      |  Private network (VPC do backend)      |
+|                                        |      |                                        |
+|  +-------------------+                 |      |  +-----------------+                   |
+|  | quanttix_ai       |                 |      |  | Frontend        |                   |
+|  | (Qwen3-32B)       |---+ HTTP        |      |  | (gestor)        |                   |
+|  | @Quanttix_bot     |   | localhost   |      |  +--------+--------+                   |
+|  +---------+---------+   |             |      |           |                            |
+|            ^             v             |      |           v                            |
+|            |  +-------------------+    |      |  +-----------------+                   |
+|            |  | quanttix_claw     |    |      |  | quanttix_backend|                   |
+|            |  | (Gemma 4 E2B)     |    |      |  | (Django + Ninja)|                   |
+|            |  | @Negotiator_bot   |----+----- REST + JWT ----------+                   |
+|            |  +---------+---------+    |      |  +--------+--------+                   |
+|            |            |              |      |           |                            |
+|            |            v Telegram     |      |           v                            |
+|            |  +-------------------+    |      |  +-----------------+                   |
+|            |  | Contraparte       |    |      |  | Postgres +      |                   |
+|            +--| (cliente/fornec.) |    |      |  | Trino/Iceberg   |                   |
+|               +-------------------+    |      |  +-----------------+                   |
+|                                        |      |           |                            |
+|  +-------------------+                 |      |           v                            |
+|  | Redis (state)     |                 |      |  +-----------------+                   |
+|  +-------------------+                 |      |  | Airflow DAGs    |                   |
++========================================+      |  | (sim_* dispatch)|                   |
+                                                |  +-----------------+                   |
+                                                +========================================+
 
-+----------+     +-----------------+     +-----------------+     +----------------+
-| Frontend | --> | quanttix_ai     | --> | quanttix_claw   | <-> | Contraparte    |
-| (gestor) | <-- | (orquestrador,  |hand-| (agente autono, |  TG | (cliente/forn) |
-+----------+     |  Qwen3-32B)     |off  |  Gemma 4 E2B)   |     +----------------+
-   @Quanttix_bot +--------+--------+     +--------+--------+
-                          |                       |        @Quanttix_Negotiator_bot
-                          | MCP                   | MCP
-                          v                       v
-                  +---------------------------------------+
-                  | quanttix_backend                      |
-                  | (FastAPI + /mcp + /simulation/dispatch|
-                  |  + guardrails + audit parcimonioso)   |
-                  +-------------------+-------------------+
-                                      |
-                                      v
-                  +---------------------------------------+
-                  | quanttix_data_eng                     |
-                  | (Airflow DAGs sim_* + Iceberg lake)   |
-                  +---------------------------------------+
+Comunicacao:
+  - quanttix_ai <-> quanttix_claw  : HTTP localhost (handoff direto)
+  - claw -> contraparte            : Telegram API (canal externo)
+  - (ai | claw) <-> backend        : HTTPS + JWT service account (cross-zone)
+  - claw <-> Redis                 : local ao Server X (state, binding)
 
-Bots Telegram (dois, com funcoes distintas):
+Bots Telegram (dois, funcoes distintas):
   @Quanttix_bot            -> canal INTERNO  (quanttix_ai <-> gestor)
   @Quanttix_Negotiator_bot -> canal EXTERNO  (quanttix_claw <-> contraparte)
 ```
