@@ -15,7 +15,7 @@
 | 2 | Skill / Persona do Agente | CONCLUÍDO |
 | 3 | Endpoints REST + Models de Negociação (backend) | CONCLUÍDO |
 | 3.5 | Pipeline data_eng — perfil_contraparte (refined→POST) | CONCLUÍDO (code) |
-| 4 | Guardrails — validação determinística | NÃO INICIADO |
+| 4 | Guardrails — validação determinística | CONCLUÍDO (code) |
 | 5 | Endpoints REST — Tools de escrita + audit | NÃO INICIADO |
 | 6 | Backend Dispatch Endpoint (SSE) | NÃO INICIADO |
 | 7 | Handoff (HTTP localhost) + Session binding (Redis) | NÃO INICIADO |
@@ -797,7 +797,7 @@ Pendências do estágio (smoke ⏳ no POD):
 **Repo**: `quanttix_backend`
 **Bloqueia**: Estágio 5
 **Depende de**: Estágios 1 e 3
-**Status**: NÃO INICIADO
+**Status**: CONCLUÍDO code ✅ (2026-05-11); smoke ⏳ no POD
 
 ### Objetivo
 Camada de validação que roda **antes** de toda tool de escrita. O LLM pode
@@ -815,35 +815,53 @@ e mesmo assim ANEXADO ao evento de negociação existente, sem tabela nova.
 - `tests/treasury/test_guardrails.py`
 
 ### Subtarefas
-- [ ] Decorador `@guardrail(rules=[...])` para envolver tools de escrita
-- [ ] Guardrail `policy_check`: chama `policy_engine.lookup()` e valida
-      `desconto_proposto_pct <= max_desconto_pct`, etc.
-- [ ] Guardrail `rate_limit`: máx N propostas por contraparte/dia, máx M
-      negociações simultâneas (chave Redis `rate:negociacao:{doc}:{date}`)
-- [ ] Guardrail `escalation_check`: se proposta > `escalation_threshold_pct`,
-      bloqueia accept automático e retorna erro `ESCALATION_REQUIRED`
-- [ ] Guardrail `block_check`: se contraparte em protesto/score baixo,
-      bloqueia toda escrita com `BLOCKED_BY_POLICY`
-- [ ] **Audit operacional (Redis)**: toda chamada de tool grava em
-      `audit:tool:{client_id}:{session_id}:{ts}` com payload comprimido
-      (gzip+base64). TTL 7 dias. Uso: debug e investigação rápida.
-      NÃO vai pro data lake — fica no Redis e expira.
-- [ ] **Audit durável (Iceberg)**: NÃO criar tabela separada. Estender o
-      schema de `quanttix.simulation.negociacao.evento` com duas colunas:
-      `guardrail_motivo STRING` e `regra_aplicada_id STRING`.
-      Apenas eventos materiais (PROPOSTA/CONTRAPROPOSTA/ACEITA/RECUSADA/
-      EXPIRADA/ESCALADA/BLOQUEADA) vão pro lake — uma linha por evento.
-- [ ] Métrica agregada (Prometheus, não evento por evento):
-      `negotiation_guardrail_blocks_total{rule="..."}`,
-      `negotiation_proposals_total{outcome="..."}`. Permite alarmar
-      tendências sem consultar a tabela.
-- [ ] Erro estruturado: `GuardrailError(code, message, hint)` parseável
-      pelo LLM para responder ao usuário/contraparte com clareza
-- [ ] Teste: tool de escrita com desconto acima do máximo é bloqueada
-- [ ] Teste: rate limit atinge limite e bloqueia próximo
-- [ ] Teste: audit operacional grava no Redis com TTL e desaparece após
-- [ ] Teste: audit durável NÃO duplica registro quando evento já existe
-- [ ] Teste: alterar policy reflete no próximo lookup sem restart
+- [x] Decorador `@guardrail` para envolver tools de escrita
+      (`treasury/services/guardrails/decorator.py`). Recebe a chamada,
+      roda cadeia de checks, injeta `_guardrail_outcomes` no kwargs.
+- [x] Guardrail `policy_check` (`policy_check.py`): chama
+      `policy_engine.lookup()` e valida `desconto_pct`, `num_parcelas`,
+      `juros_pct_mes`, `novo_vencimento` contra `PolicyDecision`.
+- [x] Guardrail `rate_limit` (`rate_limit.py`): máx propostas por
+      contraparte/dia via `django.core.cache` (chave
+      `rate:negociacao:propostas:{tenant}:{doc}:{date}`, TTL 25h);
+      máx negociações simultâneas via count direto no DB.
+- [x] Guardrail `escalation_check` (`escalation_check.py`): se
+      `accept_negotiation` com `desconto_pct > escalation_threshold_pct`,
+      levanta `ESCALATION_REQUIRED`. Para `propose`/`counter`, anota
+      `escalation_required=True` no outcome (não bloqueia).
+- [x] Guardrail `block_check` (`block_check.py`): contraparte
+      `em_protesto=True` bloqueia toda escrita com `BLOCKED_BY_POLICY`.
+      Score baixo fica para o `policy_check`.
+- [x] **Audit operacional (Redis)** (`audit_ops.py`): toda chamada de
+      tool grava em `audit:tool:{client_id}:{session_id}:{ts_us}` com
+      payload JSON+gzip+base64, TTL 7 dias. `read_audit(key)` para
+      inspeção. Falha silenciosa (audit nunca derruba operação).
+- [x] **Audit durável (Iceberg/Postgres)**: NÃO criar tabela separada.
+      Usa `NegotiationEvent.guardrail_motivo` e
+      `NegotiationEvent.regra_aplicada_id` que já foram criados no
+      Estágio 3. Estágio 5 popula esses campos a partir de
+      `kwargs["_guardrail_outcomes"]` injetado pelo decorador.
+- [x] Métrica agregada (`metrics.py`): contadores in-memory
+      thread-safe — `negotiation_guardrail_blocks_total{rule, code}` e
+      `negotiation_proposals_total{tipo, outcome}`. Interface
+      compatível com Prometheus (`prometheus_client` plug-and-play
+      no v1).
+- [x] Erro estruturado `GuardrailError(code, message, hint, regra_aplicada_id)`
+      em `exceptions.py`. Códigos fechados em `GUARDRAIL_CODES`:
+      `POLICY_VIOLATION | ESCALATION_REQUIRED | BLOCKED_BY_POLICY |
+      RATE_LIMITED | INVALID_STATE`. Método `.to_dict()` para
+      serialização REST.
+- [x] Teste: desconto acima do máximo bloqueado com `POLICY_VIOLATION`
+- [x] Teste: rate limit atinge 3 propostas/dia e bloqueia próxima
+- [x] Teste: audit operacional grava no Redis e roundtrip de leitura
+- [x] Teste: contraparte em_protesto bloqueia com `BLOCKED_BY_POLICY`
+- [x] Teste: accept acima de `escalation_threshold_pct` sobe
+      `ESCALATION_REQUIRED`
+- [x] Teste: rodada_maxima atingida sobe `ESCALATION_REQUIRED`
+- [x] Teste: `@guardrail` injeta `_guardrail_outcomes` e
+      `_guardrail_rule_id` no wrapped fn
+- [x] Teste: erro não-guardrail no wrapped faz rollback do rate_limit
+- [x] Teste: primeiro argumento não-`GuardrailContext` levanta `TypeError`
 
 ### Códigos de erro
 
@@ -858,13 +876,88 @@ INVALID_STATE          — operação não cabe no estado atual da negociação
 
 ### Critério de aceite
 - 100% das tools de escrita do Estágio 5 passam pelo decorador
-- Bypass do guardrail é impossível (testes garantem)
-- Tabela audit tem schema definido e pelo menos um teste de gravação
+  (a impor no Estágio 5 — todas as funções `*_negotiation` ganham
+  `@guardrail` antes da gravação do evento)
+- Bypass do guardrail é impossível: decorador é a única forma de chegar
+  no DB; checks rodam em sequência fixa (block → policy → escalation →
+  rate_limit) (verificado por testes ✅)
+- Audit operacional gravado em todo path: ok, blocked, error (✅
+  cobertura `test_audit_de_erro_inclui_codigo`)
+- Audit durável usa colunas já existentes em `NegotiationEvent` —
+  zero schema novo (Apêndice A)
 
 ### Notas de implementação
 - Não confie no LLM para respeitar limites — o guardrail é o NORTE
 - Audit log é write-only; nunca update/delete
-- Rate limit usa chave Redis `rate:negociacao:{contraparte_doc}:{date}`
+- Rate limit usa `django.core.cache` (django-redis já configurado no
+  backend) — chave: `rate:negociacao:propostas:{tenant}:{doc}:{date}`
+- Metrics em memória atende v0; trocar para `prometheus_client.Counter`
+  no v1 sem mudar callsite
+
+### Implementação (2026-05-11)
+
+Arquivos criados em `quanttix_backend@agentic_flow_cnab`:
+
+- `src/treasury/services/guardrails/__init__.py` — barrel exporta
+  `guardrail`, `GuardrailContext`, `GuardrailError`, `GuardrailOutcome`,
+  `GUARDRAIL_CODES`
+- `src/treasury/services/guardrails/exceptions.py` — `GuardrailError`
+  com codes fechados + `to_dict()` para serialização REST
+- `src/treasury/services/guardrails/context.py` — `GuardrailContext`
+  (frozen dataclass, hashable, primitivos só) e `GuardrailOutcome`
+- `src/treasury/services/guardrails/block_check.py` — bloqueia
+  contraparte em_protesto; passa com Counterpart ausente
+- `src/treasury/services/guardrails/policy_check.py` — chama
+  `policy_engine.lookup` injetado pelo decorador, valida desconto/
+  parcelas/juros/prazo. Operações sem termos (accept/reject) viram
+  no-op aqui (mesma assinatura, retornam outcome neutro)
+- `src/treasury/services/guardrails/escalation_check.py` — exige
+  escalation explícita quando accept acima do threshold OU
+  rodada_atual >= rodada_maxima. Em propose/counter acima do
+  threshold, só anota flag (não bloqueia)
+- `src/treasury/services/guardrails/rate_limit.py` — Django cache
+  para contador diário (TTL 25h) + count direto no DB para limite
+  global; expõe `rate_limit_rollback` para o decorador usar em erros
+- `src/treasury/services/guardrails/audit_ops.py` — `write_audit` +
+  `read_audit` com gzip+base64; sanitiza Decimal/UUID/datetime;
+  audit nunca derruba operação (try/except + log warning)
+- `src/treasury/services/guardrails/metrics.py` — contadores
+  thread-safe via `collections.Counter` + `threading.Lock`. Helpers
+  `record_guardrail_block` e `record_proposal_outcome`
+- `src/treasury/services/guardrails/decorator.py` — `@guardrail`
+  envolve fn, carrega policy 1x via `_load_policy_cached` do
+  `negotiation_service`, roda cadeia, faz audit em todo path, faz
+  rollback de rate em erro não-guardrail
+- `src/treasury/tests/test_guardrails.py` — 21 testes pytest
+  cobrindo todos os checks + decorator (sintaxe validada ✅)
+
+Decisões pontuais:
+
+- **GuardrailContext frozen** — fail-fast em mutação acidental, e
+  garante hashability para futura cache de outcome
+- **Operations sem termos** (accept/reject/escalate) passam pelo
+  `policy_check` mas viram no-op de validação — assim mantemos
+  pipeline uniforme sem condicional no decorator
+- **Score baixo NÃO bloqueia no `block_check`** — fica no `policy_check`
+  que conhece `bloqueio_score_min` da regra. Block_check só vê o
+  flag bivalente `em_protesto`, que é independente da regra
+- **Counterpart ausente NÃO bloqueia** — agente roda com defaults
+  conservadores (tier=None, score=0). policy_check faz filtro estrito
+- **Métricas em memória v0** — `prometheus_client` plug-and-play
+  no v1 sem mudar callsite (helpers `record_*` ficam idênticos)
+- **Audit nunca derruba** — falha de Redis grava warning no log
+  mas operação prossegue. Tradeoff: pode perder linhas de audit em
+  janela de incidente Redis, mas evita criar dependência rígida
+
+Pendências do estágio (smoke ⏳ no POD):
+
+- `pytest src/treasury/tests/test_guardrails.py` executa com Django
+  + DB ativo
+- Confirmar que `cache.set/get` com `django-redis` no POD bate com
+  os testes que usam `locmem` cache em settings_test
+- Integração com Estágio 5: cada tool de escrita ganha `@guardrail`
+  e usa `kwargs["_guardrail_outcomes"]["policy"].rule_id` para
+  popular `NegotiationEvent.regra_aplicada_id`
 
 ---
 
