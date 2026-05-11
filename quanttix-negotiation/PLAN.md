@@ -18,7 +18,8 @@
 | 4 | Guardrails — validação determinística | CONCLUÍDO (code) |
 | 5 | Endpoints REST — Tools de escrita + audit | CONCLUÍDO (code) |
 | 6 | Backend Dispatch Endpoint (SSE) | CONCLUÍDO (code) |
-| 7 | Handoff (HTTP localhost) + Session binding (Redis) | NÃO INICIADO |
+| 7a | Handoff + Session binding + Observer SSE (v1 minimal) | CONCLUÍDO (code) |
+| 7b | OpenClaw plugin LLM-driven + UI dedicada + pubsub | NÃO INICIADO |
 | 8 | Allowlist dinâmica Telegram + testes E2E | NÃO INICIADO |
 
 ---
@@ -1283,118 +1284,198 @@ Pendências do estágio (smoke ⏳ no POD):
 
 ---
 
-## Estágio 7: Handoff (HTTP localhost) + Session binding (Redis)
+## Estágio 7a: Handoff + Session binding + Observer SSE (v1 minimal)
 
-**Repo**: `quanttix_claw` + `quanttix_ai`
+**Repos**: `quanttix_backend` + `quanttix_claw` + `quanttix_ai` + `quanttix_frontend`
 **Bloqueia**: Estágio 8
 **Depende de**: Estágios 5 e 6
-**Status**: NÃO INICIADO
+**Status**: CONCLUÍDO code ✅ (2026-05-11); smoke ⏳ no POD
 
-### Objetivo
-Dois sub-problemas conectados, simplificados pela topologia (AI e Claw
-no mesmo Server X):
+### Refinamento do PLAN original
 
-1. **Handoff**: `quanttix_ai` decide iniciar negociação de um título →
-   chama o `quanttix_claw` via **HTTP POST localhost** com contexto
-   completo + `chat_id` de destino. Substitui o caminho antigo onde
-   `quanttix_ai` falava direto via Telegram com o contraparte (versão
-   "pobre" referida pelo usuário).
+O Estágio 7 foi **dividido em 7a (v1 mínima) e 7b (refinamentos)** após
+revisão arquitetural com o usuário. Decisão chave: `quanttix_ai` continua
+sendo o **orquestrador superior** que conversa com o gestor no
+frontend — **não fala Telegram**. Quem fala com a contraparte é o
+**handoff_server** (Python loopback) dentro de `quanttix-negotiation/`.
 
-2. **Session binding**: `quanttix_claw` mantém `chat_id ↔ negociacao_id`
-   no Redis (local ao Server X) para que cada resposta do contraparte
-   seja interpretada no contexto certo (qual título, qual rodada, qual
-   última proposta).
+OpenClaw plugin SDK (v0) não expõe registro de endpoints HTTP
+arbitrários — só channels/providers/agents. Em vez de fork invasivo,
+v1 vai com Python FastAPI separado. v2 absorve no OpenClaw quando o
+Gemma 4 E2B for production-ready como agente conversacional.
 
-### Por que HTTP localhost (e não Redis pub/sub)
-AI e Claw rodam no mesmo servidor. Chamada direta `localhost:18789`
-é trivial (latência microsegundos), síncrona, simples de depurar e
-não exige listener no Claw nem broker pra fanout. Redis fica só pra
-state compartilhado.
+### Componentes implementados
 
-### Entregáveis
-- `quanttix_ai/llm_api/services/handoff_client.py` (httpx client localhost)
-- `extensions/quanttix-negotiation/src/handoff_endpoint.ts`
-  (HTTP handler exposto pelo OpenClaw gateway)
-- `extensions/quanttix-negotiation/src/session_binding.ts` (lookup pre-LLM)
-- `extensions/quanttix-negotiation/src/redis_client.ts` (compartilhado)
-- `tests/integration/test_handoff_flow.py`
+#### `quanttix_backend@agentic_flow_cnab`
 
-### Subtarefas
-- [ ] Definir contrato do handoff (ver "Contrato — Handoff" abaixo)
-- [ ] Implementar `handoff_endpoint.ts` no extension —
-      `POST http://localhost:18789/negotiation/start` recebe payload e:
-      1. valida bearer token (compartilhado localhost only, low-risk)
-      2. cria binding `chat_id ↔ negociacao_id` no Redis
-      3. busca contexto via REST tools (Estágio 3) para enriquecer prompt
-      4. envia primeira mensagem ao contraparte via canal Telegram OpenClaw
-- [ ] Implementar `handoff_client.py` no `quanttix_ai` —
-      httpx POST contra `http://localhost:18789/negotiation/start`,
-      retry com backoff em caso de 5xx
-- [ ] Layout de chaves Redis (local ao Server X):
-  - `chat:tg:{chat_id} → {negociacao_id, counterpart_doc, bound_at}`
-  - `negociacao:{negociacao_id}:chat → {channel, chat_id}`
-  - `lock:chat:{chat_id}` (TTL 5s, evita race de mensagens em paralelo)
-- [ ] Hook OpenClaw pre-LLM em `session_binding.ts` — antes de invocar o
-      LLM em mensagem nova, lê `chat:tg:{chat_id}` do Redis e injeta
-      contexto no system prompt (negociacao_id, título, policy, etc.)
-- [ ] TTL do binding: 7 dias com renovação a cada mensagem
-- [ ] Encerramento: ao receber status terminal (ACEITA/RECUSADA/EXPIRADA),
-      limpar `chat:tg:{chat_id}` e `negociacao:{neg_id}:chat`
-- [ ] **Migração do `quanttix_ai`**: `start_negotiation()` do
-      `NegotiationOrchestrator` muda — em vez de chamar `TelegramService`
-      direto, chama `handoff_client.request_start()`. Manter o caminho
-      antigo atrás de flag `USE_LEGACY_NEGOTIATION=true` por uma versão
-      pra rollback rápido
-- [ ] Teste: binding cria as duas chaves Redis consistentes
-- [ ] Teste: hook retorna `None` para chat não vinculado
-- [ ] Teste E2E handoff: `quanttix_ai` dispara → claw recebe → manda 1ª msg
-- [ ] Teste: TTL renova ao chegar nova mensagem do contraparte
-- [ ] Teste: encerramento limpa as chaves
-- [ ] Teste: flag legacy desliga handoff novo e usa caminho antigo
+Novo endpoint SSE em `treasury/api_negotiation.py`:
 
-### Contrato — Handoff payload
+```
+GET /api/v1/tesouraria/negotiation/{negociacao_id}/events
+  → text/event-stream
+  → replay dos NegotiationEvents existentes + novos em tempo real
+  → polling DB a cada 1s (sem Redis pubsub na v0)
+  → heartbeat 15s; encerra em status_atual terminal OU 1h max
+  → eventos: negotiation_event | negotiation_terminal | stream_timeout
+```
 
-```json
-{
-  "negociacao_id": "neg_abc123",
-  "title_id": "SE1-001",
-  "tipo_titulo": "AR",
-  "counterpart_doc": "12.345.678/0001-99",
-  "counterpart_nome": "Cliente Exemplo S.A.",
-  "channel": "telegram",
-  "chat_id": "987654321",
-  "instructions": {
-    "tone": "cordial",
-    "max_desconto_pct_authorized": 10.0,
-    "expiracao_em_horas": 48,
-    "mensagem_inicial_sugerida": "..."
-  }
-}
+Arquivos:
+- `src/treasury/services/negotiation_events_stream.py` (~165 linhas)
+- `src/treasury/api_negotiation.py` (endpoint adicionado)
+- `src/treasury/tests/test_negotiation_events_stream.py` (4 testes)
+
+#### `quanttix_claw@developer` — handoff_server (FastAPI Python)
+
+Localizado em `quanttix-negotiation/handoff_server/`. Processo separado
+rodando em **porta loopback 18790** (gateway OpenClaw fica em 18789,
+sem conflito). Roda como `uvicorn handoff_server.main:app --host 127.0.0.1 --port 18790`.
+
+Endpoints:
+- `POST /negotiation/start` — recebe handoff do AI; cria negociação
+  no backend (`POST /tesouraria/negotiation/propose`), grava binding
+  Redis (chat_id↔neg_id), envia 1ª mensagem Telegram
+- `POST /telegram/webhook` — recebe respostas do contraparte;
+  classifica por keyword (SIM/NAO/contraproposta); grava
+  ACEITA/RECUSADA/CONTRAPROPOSTA no backend; libera binding em terminal
+- `GET /health` — smoke
+
+Módulos:
+- `main.py` — FastAPI app + uvicorn entry
+- `config.py` — Pydantic Settings (env-driven)
+- `handoff_endpoint.py` — POST /negotiation/start
+- `telegram_webhook.py` — POST /telegram/webhook + `classify_reply()`
+- `session_binding.py` — Redis chat:tg:{chat_id} + negociacao:{id}:chat,
+  TTL 7d, lock 5s contra race
+- `backend_client.py` — httpx REST do backend (svc_quanttix_claw)
+- `telegram_sender.py` — Telegram Bot API
+- `tests/test_classifier.py` — 14 casos parametrizados
+
+Auth loopback: bearer token `QUANTTIX_HANDOFF_TOKEN` validado no
+`handoff_endpoint`. Token gerado em 2026-05-11:
+`5qDxrFeKRfBP5KpprxQzQMkH4casWDKHpiVWSsieogQ` (placeholder; colar real
+nos `.env` dos dois lados no POD).
+
+#### `quanttix_ai@developer_cpp`
+
+Novos módulos:
+
+- `llm_api/services/handoff_client.py` — httpx Client sincrono que faz
+  POST loopback ao handoff_server com retry simples
+- `llm_api/services/negotiation_observer.py` — asyncio task que abre
+  SSE do backend `/negotiation/{neg_id}/events`, converte eventos em
+  `NegotiationEvent` da timeline do orquestrador e faz `_rpush_event(flow_id, ev)`.
+  Cada evento carrega `data.notification` estruturado
+  `{type, title, message, terminal}` para o frontend exibir como Toast
+  + item de timeline
+
+Integração no `NegotiationOrchestrator.process_next_item`:
+
+- Roteamento via flag `USE_LEGACY_NEGOTIATION`:
+  - `False` (default): novo caminho `_dispatch_via_handoff` —
+    POST loopback ao handoff_server + dispara `NegotiationObserver`
+  - `True`: caminho legado mantido (envio direto via TelegramService)
+    para rollback rápido
+- `_dispatch_via_handoff` emite evento `handoff_complete` no flow do
+  gestor com `{negociacao_id, evento_id, message_sent, ...}`
+- `NegotiableItem` ganhou campo `counterpart_doc: Optional[str]` —
+  TODO: copiar de `/fluxos` quando backend expuser cpf_cnpj
+- Novas config keys: `HANDOFF_BASE_URL`, `QUANTTIX_HANDOFF_TOKEN`,
+  `USE_LEGACY_NEGOTIATION`
+
+#### `quanttix_frontend@developer_llm`
+
+Modificações em `ChatAssistant.tsx` e `DataVisualizationPanel.tsx`:
+
+- Mapping de eventos novos (`handoff_complete`, `negotiation_update`)
+  no switch de labels + no `eventMeta` do painel timeline
+- Import + chamada de `toastBridge.notify(message, type)` quando evento
+  `negotiation_update` chega — toast efêmero notifica o gestor sem
+  interromper a conversa
+- Detecção de evento terminal via `ev.data.terminal === true` para
+  marcar viz como `completed`
+- Painel já abre automaticamente no primeiro evento (`setShowDataPanel(true)`)
+- **Toast clicável** para abrir o painel: ficou pra **Estágio 7b**
+  (requer adaptar `Toast.tsx` para aceitar `onClick`)
+
+### Fluxo end-to-end (v1)
+
+```
+1. Gestor (frontend) → quanttix_ai: "negocie SE1-001"
+2. quanttix_ai: NegotiationOrchestrator.start_flow → analisa fluxos_ar
+3. Frontend mostra lista no painel → gestor seleciona
+4. quanttix_ai.process_next_item → _dispatch_via_handoff:
+   a. POST http://127.0.0.1:18790/negotiation/start (bearer token)
+   b. handoff_server:
+      - POST backend /tesouraria/negotiation/propose (cria Neg + evento PROPOSTA)
+      - cria binding Redis chat_id↔neg_id
+      - envia 1ª mensagem Telegram ao contraparte
+   c. quanttix_ai: emite handoff_complete + dispara NegotiationObserver
+5. NegotiationObserver: SSE com backend /tesouraria/negotiation/{neg_id}/events
+   a. Recebe negotiation_event (PROPOSTA) → emite negotiation_update no flow do gestor
+   b. Frontend: Toast info "📨 Proposta enviada à Cliente X (SE1-001)"
+   c. Painel timeline ganha novo item
+6. Contraparte responde no Telegram → handoff_server webhook:
+   a. lookup binding pelo chat_id
+   b. classify_reply: ACCEPT | REJECT | COUNTER
+   c. grava evento no backend (accept_negotiation / reject_negotiation /
+      register_counterproposal)
+7. Backend SSE: novo NegotiationEvent → quanttix_ai observer:
+   a. emite negotiation_update no flow do gestor
+   b. Toast: "✅ Negociação aceita" (success) ou similar
+   c. Em terminal (ACEITA/RECUSADA/EXPIRADA/BLOQUEADA): observer encerra,
+      binding é liberado no claw side
 ```
 
 ### Critério de aceite
-- Frontend pede negociação → `quanttix_ai` escolhe título → claw envia
-  primeira mensagem ao contraparte automaticamente
-- Mensagem nova no Telegram chega ao LLM com contexto enriquecido
-  (título, histórico, policy)
-- Trocar de chat não vaza contexto entre conversas
-- Encerrar negociação remove o binding automaticamente
-- Flag `USE_LEGACY_NEGOTIATION=true` retorna ao caminho antigo
 
-### Notas de implementação
-- OpenClaw mantém histórico de mensagens nativo; o session binding é
-  COMPLEMENTAR — "memória de negócio" ≠ "memória de conversa"
-- Race condition: 2 mensagens do mesmo chat em <1s — usar lock distribuído
-  no Redis (chave `lock:chat:{chat_id}`, TTL 5s) ou aceitar best-effort
-- `quanttix_ai` **não** chama mais a Telegram API direto após esta etapa
-  — todo tráfego com contraparte passa pelo claw
-- `NegotiationOrchestrator` antigo do `quanttix_ai` vira fallback,
-  não primário
-- O endpoint `handoff_endpoint.ts` é exposto apenas em `127.0.0.1` no
-  Server X — não precisa de TLS nem allowlist IP, só bearer token
-  compartilhado por env (`QUANTTIX_HANDOFF_TOKEN`)
-- Comunicação entre AI e Claw NÃO passa pelo backend; o backend só é
-  envolvido nas tools (REST + JWT) e no dispatch (Estágio 6)
+- code ✅ Frontend continua livre pra gestor conversar enquanto a
+  negociação roda em background (handoff é POST de 10s timeout; sem block)
+- code ✅ Updates assíncronos chegam via SSE e viram Toast + item no painel
+- code ✅ Flag de fallback `USE_LEGACY_NEGOTIATION=true` mantém caminho antigo
+- smoke ⏳ Cenário end-to-end no POD: gestor pede → AI prepara → claw
+  manda Telegram → contraparte responde → AI mostra status
+
+### Pendências v1 (smoke ⏳ POD)
+
+- Variáveis de env nos serviços:
+  - `quanttix_ai`: `HANDOFF_BASE_URL`, `QUANTTIX_HANDOFF_TOKEN`,
+    `USE_LEGACY_NEGOTIATION=false`
+  - `handoff_server`: `QUANTTIX_HANDOFF_TOKEN`, `TELEGRAM_BOT_TOKEN`,
+    `BACKEND_*`, `REDIS_*`
+- Service account `svc_quanttix_claw@quanttix.com` com `ROLE_AGENT_SERVICE`
+  (Estágio 3 — criado via admin Django)
+- Pip install deps do `handoff_server`:
+  `pip install -r quanttix-negotiation/handoff_server/requirements.txt`
+- Subir `handoff_server`: `uvicorn handoff_server.main:app --host 127.0.0.1 --port 18790`
+- Apontar webhook do Telegram bot `@Quanttix_Negotiator_bot` para
+  `https://<pod-public-url>/telegram/webhook` (com `TELEGRAM_WEBHOOK_SECRET`)
+
+---
+
+## Estágio 7b: OpenClaw plugin LLM-driven + UI dedicada + pubsub (v2)
+
+**Repos**: `quanttix_claw` + `quanttix_frontend`
+**Bloqueia**: nada
+**Depende de**: Estágio 7a + Gemma 4 E2B production-ready
+**Status**: NÃO INICIADO
+**Pode rodar em paralelo com**: Estágio 8
+
+### Escopo (refinamentos do v1)
+
+- **OpenClaw plugin** absorve o `handoff_server` Python — agente
+  conversacional Gemma 4 E2B (provider `quanttix-planner`) conduz
+  Telegram com LLM em vez de keyword classify
+- **Pubsub Redis** entre backend e AI substitui o polling 1s do
+  `/negotiation/{neg_id}/events` — latência mais baixa, menos load no DB
+- **Toast clicável** no frontend: `Toast.tsx` aceita `onClick` para
+  abrir/scroll no painel timeline
+- **UI dedicada de negociação**: badge "negociação em andamento",
+  timeline visual estilizada, ações de override (cancelar, pausar,
+  forçar accept) para o gestor
+- **Concorrência**: gestor inicia 5 negociações simultâneas; AI mantém
+  5 observers paralelos sem conflito de flow_id
+- **Métricas**: Prometheus counters
+  (tempo médio de resposta da contraparte, taxa de fechamento, etc.)
 
 ---
 
