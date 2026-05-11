@@ -9,18 +9,32 @@
 
 ## Status global
 
-| # | Estágio | Status |
+| # | Estágio | Status code | Onda PR | Smoke POD |
+|---|---|---|---|---|
+| 1 | Política de Negociação (Playbook) | CONCLUÍDO | Onda 1 (PR 1.1) | ⏳ |
+| 2 | Skill / Persona do Agente | CONCLUÍDO | Onda 4 (PR 4.2) | ⏳ |
+| 3 | Endpoints REST + Models de Negociação (backend) | CONCLUÍDO | Onda 1 (PR 1.1) | ⏳ |
+| 3.5 | Pipeline data_eng — perfil_contraparte (refined→POST) | CONCLUÍDO | Onda 2 (PR 2.1) | ⏳ |
+| 4 | Guardrails — validação determinística | CONCLUÍDO | Onda 1 (PR 1.1) | ⏳ |
+| 5 | Endpoints REST — Tools de escrita + audit | CONCLUÍDO | Onda 1 (PR 1.1) | ⏳ |
+| 6 | Backend Dispatch Endpoint (SSE) | CONCLUÍDO | Onda 3 (PR 3.1) | ⏳ |
+| 7a | Handoff + Session binding + Observer SSE (v1 minimal) | CONCLUÍDO | Onda 4 (PR 4.1-4.4) | ⏳ |
+| 7b | OpenClaw plugin LLM-driven + UI dedicada + pubsub | NÃO INICIADO | — | — |
+| 8 | Allowlist dinâmica Telegram + testes E2E | NÃO INICIADO | — | — |
+
+**Próximo passo operacional**: abertura dos 7 PRs em 4 ondas modulares
+testáveis independentemente. Estratégia completa em
+[`/Users/guaranta/Documents/Projetos/Dakkar/Quantix/Estrategia_PRs_Agente_Negociacao.docx`](../../Estrategia_PRs_Agente_Negociacao.docx)
+(seções 4-6 contêm os comandos git de preparação).
+
+Onda → PR mapping resumido:
+
+| Onda | Sub-sistema | PRs |
 |---|---|---|
-| 1 | Política de Negociação (Playbook) | CONCLUÍDO |
-| 2 | Skill / Persona do Agente | CONCLUÍDO |
-| 3 | Endpoints REST + Models de Negociação (backend) | CONCLUÍDO |
-| 3.5 | Pipeline data_eng — perfil_contraparte (refined→POST) | CONCLUÍDO (code) |
-| 4 | Guardrails — validação determinística | CONCLUÍDO (code) |
-| 5 | Endpoints REST — Tools de escrita + audit | CONCLUÍDO (code) |
-| 6 | Backend Dispatch Endpoint (SSE) | CONCLUÍDO (code) |
-| 7a | Handoff + Session binding + Observer SSE (v1 minimal) | CONCLUÍDO (code) |
-| 7b | OpenClaw plugin LLM-driven + UI dedicada + pubsub | NÃO INICIADO |
-| 8 | Allowlist dinâmica Telegram + testes E2E | NÃO INICIADO |
+| 1 | Fundação Backend (1, 3, 4, 5) | 1.1 `quanttix_backend` |
+| 2 | Pipeline Dados (3.5) | 2.1 `quanttix_data_eng` |
+| 3 | Dispatch + Simulação (6) | 3.1 `quanttix_backend` stacked sobre 1.1 |
+| 4 | Agente Conversacional (2, 7a) | 4.1 `quanttix_backend` stacked sobre 3.1<br/>4.2 `quanttix_claw`<br/>4.3 `quanttix_ai`<br/>4.4 `quanttix_frontend` |
 
 ---
 
@@ -1529,6 +1543,59 @@ ao encerrar, sai.
 - Para CI, mockar o Telegram Bot API (não chamar de verdade)
 - Considerar logging detalhado neste estágio — vai ser onde a maioria
   dos bugs aparece em integração
+
+---
+
+## Estado atual — Preparação de PRs (2026-05-11)
+
+Após conclusão code-complete dos Estágios 1-7a, o trabalho pendente
+imediato é **abrir os Pull Requests** em ondas testáveis modulares,
+permitindo validação real (smoke no POD) subsistema por subsistema.
+
+### Documento de referência
+
+A estratégia completa, com comandos git de preparação, variáveis de
+ambiente por serviço, checklist pré-abertura e análise de riscos,
+está em:
+
+```
+/Users/guaranta/Documents/Projetos/Dakkar/Quantix/Estrategia_PRs_Agente_Negociacao.docx
+```
+
+10 seções, ~7 páginas. Pontos chave:
+
+- **4 ondas, 7 PRs no total.**
+- **Stacked PRs no backend** (Onda 1.1 → 3.1 → 4.1) para modularizar
+  os Estágios 1+3+4+5, 6, e 7a sem reescrever história.
+- **Onda 4 funciona sem Onda 3** — accept_negotiation grava ACEITA mas
+  não emite boleto. Gap conhecido aceitável para v1 do agente.
+- **Token loopback gerado**:
+  `QUANTTIX_HANDOFF_TOKEN=5qDxrFeKRfBP5KpprxQzQMkH4casWDKHpiVWSsieogQ`
+  (placeholder; colar real nos `.env` do POD).
+
+### Sequência de execução proposta
+
+1. Aprovar a divisão proposta (4 ondas, 7 PRs).
+2. Responder questões abertas no documento (base = main? PR draft?
+   uso do `gh` CLI?).
+3. Executar os comandos git (`git checkout -b … && git cherry-pick …`)
+   por repo.
+4. Push das feature branches e abertura dos 7 PRs.
+5. Mergear na ordem 1.1 → 2.1 → 3.1 → 4.1 → (4.2, 4.3, 4.4 paralelos).
+6. Smoke no POD de cada onda → atualizar status no Status Global desta
+   PLAN.md de "⏳" para "✅" na coluna **Smoke POD**.
+
+### O que vem depois das ondas mergeadas
+
+- **Estágio 7b** (refinamentos opcionais): OpenClaw plugin LLM-driven
+  substitui o `handoff_server` Python; pubsub Redis substitui polling
+  do SSE; toast clicável + UI dedicada de negociação; concorrência
+  multi-flow.
+- **Estágio 8** (allowlist + E2E): allowlist dinâmica Telegram +
+  testes E2E orquestrando todos os repos.
+
+Ambos só fazem sentido começar depois que v1 (Ondas 1-4) estiver
+operacional e validada no POD.
 
 ---
 
