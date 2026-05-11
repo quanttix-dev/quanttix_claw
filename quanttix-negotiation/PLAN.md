@@ -11,7 +11,7 @@
 
 | # | Estágio | Status |
 |---|---|---|
-| 1 | Política de Negociação (Playbook) | NÃO INICIADO |
+| 1 | Política de Negociação (Playbook) | CONCLUÍDO |
 | 2 | Skill / Persona do Agente | NÃO INICIADO |
 | 3 | Endpoints REST — Tools de leitura | NÃO INICIADO |
 | 4 | Guardrails — validação determinística | NÃO INICIADO |
@@ -27,7 +27,7 @@
 **Repo**: `quanttix_backend`
 **Bloqueia**: Estágios 2, 3, 4, 5
 **Depende de**: nada
-**Status**: NÃO INICIADO
+**Status**: CONCLUÍDO (2026-05-10, 35/35 testes passando)
 
 ### Objetivo
 Codificar em YAML as regras de engajamento (faixas de desconto, prazo,
@@ -52,7 +52,7 @@ e revisam aqui). Quando alinhada, é promovida para a cópia operacional
 no backend.
 
 ### Subtarefas
-- [ ] Schema Pydantic v2 (`policy_schema.py`):
+- [x] Schema Pydantic v2 (`policy_schema.py`):
   - `PolicyRule` com: `id`, `descricao`, `tipo_titulo (AR|AP)`,
     `tier (str|None)`, `valor_min`, `valor_max (None=infinito)`,
     `max_desconto_pct`, `max_parcelas`, `max_prazo_dias_extra`,
@@ -64,23 +64,37 @@ no backend.
   - `Policy` (root) com `version`, `tenant_id (None)`, `rules`, `defaults`
   - Validators: `0 <= max_desconto_pct <= 100`,
     `escalation_threshold_pct <= max_desconto_pct`, rule ids únicos
-- [ ] Engine (`policy_engine.py`):
+- [x] Engine (`policy_engine.py`):
   - `load_policy(path: Path) -> Policy` (yaml.safe_load + Pydantic parse)
-  - Método `Policy.lookup(title_meta, counterpart_meta) -> PolicyDecision`
+  - Função `lookup(policy, title_meta, counterpart_meta) -> PolicyDecision`
   - Hierarquia de match: regra com tier específico vence regra sem tier;
     regra com `valor_max` finito vence regra sem teto (dentro da faixa);
     desempate por ordem de declaração no YAML
-- [ ] Promover YAML operacional para `src/treasury/config/negotiation_policy.yaml`
+- [x] Promover YAML operacional para `src/treasury/config/negotiation_policy.yaml`
       com os 4 cenários (AR-vip 5%, AR-padrao 10%, AP-estrategico 5%, AP-padrao 10%)
-- [ ] Teste: policy válida carrega sem erro
-- [ ] Teste: policy inválida (`max_desconto > 100`) falha com mensagem legível
-- [ ] Teste: `lookup` escolhe `AR-vip` quando `counterpart.tier=vip`
-- [ ] Teste: `lookup` cai em `AR-padrao` quando `counterpart.tier=padrao`
-- [ ] Teste: `lookup` escolhe `AP-estrategico` quando `tier=estrategico`
-- [ ] Teste: `bloqueio_em_protesto=True` (AR-vip ou AR-padrao) retorna
+- [x] Teste: policy válida carrega sem erro
+- [x] Teste: policy inválida (`max_desconto > 100`) falha com mensagem legível
+- [x] Teste: `lookup` escolhe `AR-vip` quando `counterpart.tier=vip`
+- [x] Teste: `lookup` cai em `AR-padrao` quando `counterpart.tier=padrao`
+- [x] Teste: `lookup` escolhe `AP-estrategico` quando `tier=estrategico`
+- [x] Teste: `bloqueio_em_protesto=True` (AR-vip ou AR-padrao) retorna
       `PolicyDecision(allowed=False)`
-- [ ] Teste: `policy.defaults.rodada_maxima` acessível e tipado
-- [ ] Documentar formato em `negotiation_policy/README.md` com exemplos
+- [x] Teste: `policy.defaults.rodada_maxima` acessível e tipado
+- [x] Documentar formato em `negotiation_policy/README.md` com exemplos
+
+### Implementação (2026-05-10)
+- Arquivos criados:
+  - `src/treasury/services/negotiation_policy/__init__.py`
+  - `src/treasury/services/negotiation_policy/policy_schema.py` (Pydantic models)
+  - `src/treasury/services/negotiation_policy/policy_engine.py` (load + lookup)
+  - `src/treasury/services/negotiation_policy/README.md`
+  - `src/treasury/config/negotiation_policy.yaml` (4 tiers operacionais)
+  - `src/treasury/tests/test_negotiation_policy_schema.py` (18 testes)
+  - `src/treasury/tests/test_negotiation_policy_engine.py` (17 testes)
+- Resultado: **35/35 testes passando** (sem warnings significativos)
+- Decisão pontual: `lookup` ficou como função top-level em vez de método
+  em `Policy` — mantém schema puramente data, separação engine/dado mais
+  clara para o painel admin futuro
 
 ### Contrato — PolicyDecision
 
