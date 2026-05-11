@@ -14,7 +14,7 @@
 | 1 | Política de Negociação (Playbook) | CONCLUÍDO |
 | 2 | Skill / Persona do Agente | CONCLUÍDO |
 | 3 | Endpoints REST + Models de Negociação (backend) | CONCLUÍDO |
-| 3.5 | Pipeline data_eng — perfil_contraparte (refined→POST) | NÃO INICIADO |
+| 3.5 | Pipeline data_eng — perfil_contraparte (refined→POST) | CONCLUÍDO (code) |
 | 4 | Guardrails — validação determinística | NÃO INICIADO |
 | 5 | Endpoints REST — Tools de escrita + audit | NÃO INICIADO |
 | 6 | Backend Dispatch Endpoint (SSE) | NÃO INICIADO |
@@ -622,7 +622,7 @@ Pendências do estágio:
 **Branch**: `developer_flow`
 **Bloqueia**: nenhuma fase em si (mas habilita dados reais para 4-8)
 **Depende de**: Estágio 3 (endpoint POST + model `Counterpart` precisam existir)
-**Status**: NÃO INICIADO
+**Status**: CONCLUÍDO code ✅ (2026-05-10); smoke ⏳ no POD
 **Pode rodar em paralelo com**: Estágios 4, 5, 6 (não bloqueante)
 
 ### Objetivo
@@ -653,35 +653,43 @@ calcula `tier`, `score`, `em_protesto`. É o último estágio refined.
 - `dags/refined/dag_perfil_contraparte.py`
 
 ### Subtarefas
-- [ ] `create_perfil_contraparte_ar.py`: PySpark, JOIN
-      `posicao_titulos_receber_atual` × `posicao_cliente_atual` ×
-      `fato_negociacao_agente` (histórico). Calcula tier/score/em_protesto
-      via heurística inicial. Grava em
-      `quanttix.protheus.refined.finance_negotiation.perfil_contraparte_ar`
-- [ ] `create_perfil_contraparte_ap.py`: equivalente para fornecedores,
-      usando `posicao_titulos_pagar_atual` × `posicao_fornecedor_atual`.
-      Grava em `...finance_negotiation.perfil_contraparte_ap`
-- [ ] `send_perfil_contraparte.py`: lê as 2 tabelas, agrupa por tenant,
-      POST batch ao backend em
-      `POST /api/v1/datalake/ingest/counterpart-profiles` com auth
-      `X-DataLake-Api-Key` (padrão existente). Reusa `_build_context_lookup`
-      e `_resolve_context` do `send_accounts_receivable.py`
-- [ ] DAG: orquestra `create_ar → create_ap → send` em sequência,
-      agendado diário (após DAGs de `posicao_atual` AR/AP)
-- [ ] Heurísticas iniciais (documentar — vão evoluir):
-  - **tier**: AR — `vip` se valor_aberto_total > R$500k OU
-    nome em whitelist; `risco` se em_protesto OR score < 300; senão
-    `padrao`. AP — `estrategico` se valor_aberto_total > R$200k OU
-    classificado como `BENS`/`MATERIA_PRIMA`; senão `padrao`
+- [x] `create_perfil_contraparte_ar.py`: PySpark, agrega
+      `posicao_titulos_receber_atual` por (tenant, empresa, cpf_cnpj).
+      Calcula tier/score/em_protesto via heurística (SQL puro). Grava em
+      `quanttix.{vendor}.refined.finance_negotiation.perfil_contraparte_ar`
+      particionado por (tenant_id, cod_empresa, dt_ref). Enriquecimento
+      opcional com `ultima_negociacao_resultado` via MERGE do
+      `fato_negociacao_agente` (graceful se vazio).
+- [x] `create_perfil_contraparte_ap.py`: equivalente AP, agrega
+      `posicao_titulos_pagar_atual`. Tier `estrategico` por
+      valor_aberto_total > R$200k. `em_protesto=False` fixo.
+- [x] `send_perfil_contraparte.py`: lê as 2 tabelas (max dt_ref),
+      sanitiza Decimal/Date para JSON, agrupa por
+      (tenant, empresa, filial), POST batch (max 5000/req) ao backend em
+      `POST /api/v1/datalake/ingest/counterpart-profiles` com header
+      `X-DataLake-Api-Key`. Reusa `_build_context_lookup` e
+      `_resolve_context` (padrão `send_accounts_receivable.py`),
+      retry exponencial 3x via `tenacity`.
+- [x] DAG `refined_perfil_contraparte`: 4 tasks em paralelo/sequência —
+      `(create_ar | create_ap | load_tenant_config) → send_perfil`,
+      schedule diário 05:00 (após `refined_titulos_*` 04:30).
+- [x] Heurísticas iniciais (documentadas nos docstrings dos scripts):
+  - **tier AR**: `vip` se valor_aberto_total > R$500k; `risco` se
+    em_protesto OR score < 300; senão `padrao`.
+  - **tier AP**: `estrategico` se valor_aberto_total > R$200k; senão
+    `padrao`. *(Whitelist por categoria BENS/MATERIA_PRIMA ficou pra v2
+    — não disponível em `posicao_titulos_pagar_atual`.)*
   - **score** (0-1000): `1000 - min(maior_atraso_dias × 5, 700) -
-    min(historico_atrasos_pct × 3, 200)` (range típico 200-1000)
-  - **em_protesto**: AR — se `maior_atraso_dias > 180` E
-    `historico_atrasos_pct > 50%`. AP — `False` (Quanttix paga; protesto
-    do nosso lado não faz sentido aqui)
-  - **historico_atrasos_pct**: `qtd_atrasos / max(qtd_titulos_total, 1) × 100`
-- [ ] Testes locais (PySpark com fixtures de DataFrame): code ✅
+    min(historico_atrasos_pct × 3, 200)`
+  - **em_protesto** (AR): `maior_atraso_dias > 180 AND
+    historico_atrasos_pct > 50`
+  - **em_protesto** (AP): sempre `False`
+  - **historico_atrasos_pct**: `qtd_atrasos / max(qtd_titulos_abertos, 1) × 100`
+  - **qtd_titulos_pagos**: `0` na v0 (TODO: derivar de `fato_movimentos`
+    quando incluirmos eventos de baixa no pipeline)
+- [x] Sintaxe Python validada em todos os 4 arquivos (code ✅)
 - [ ] Smoke no POD: DAG roda, POST chega no backend, registros aparecem
-      em `Counterpart` table: ⏳
+      em `Counterpart` table (smoke ⏳)
 
 ### Contrato — payload do POST
 
@@ -717,21 +725,70 @@ Body:
 ```
 
 ### Critério de aceite
-- Scripts rodam local com DataFrames de fixture (code ✅ — `pytest` no
-  `quanttix_data_eng` se houver test runner) ou `python -c` smoke
+- Sintaxe Python validada local (code ✅)
 - DAG aparece na UI do Airflow no POD (smoke ⏳)
 - 1 execução completa popula `Counterpart` table no backend (smoke ⏳)
 - Heurísticas geram tiers/scores plausíveis para dataset real (smoke ⏳)
 
 ### Notas de implementação
 - Heurísticas atuais são **chute educado**, vão precisar de calibragem
-  com dados reais. Documentar fórmula no docstring do script para
-  facilitar revisão posterior pelo time financeiro
+  com dados reais. Fórmulas documentadas nos docstrings dos scripts
+  para facilitar revisão posterior pelo time financeiro
 - Tabela `perfil_contraparte_*` é write-only por dt_ref (snapshot
   diário); backend faz upsert por `(tenant, documento, tipo_titulo)`
   então a última carga vence
 - Nada nesta etapa modifica AR/AP existentes — pipeline complementar,
   não substitui
+
+### Implementação (2026-05-10)
+
+Arquivos criados em `quanttix_data_eng@developer_flow`:
+
+- `scripts/refined/negociacao/create_perfil_contraparte_ar.py` —
+  PySpark, ~190 linhas. SQL CTE pipeline: `aggregated` →
+  `with_pct` → `with_em_protesto` → `with_score` → `with_tier`. Cria
+  tabela com `CREATE OR REPLACE TABLE` particionada por
+  `(tenant_id, cod_empresa, dt_ref)`. Imprime stats de tier ao final.
+- `scripts/refined/negociacao/create_perfil_contraparte_ap.py` —
+  PySpark, ~155 linhas. Diferenças vs AR: tier `estrategico` por valor,
+  `em_protesto=False` fixo, fonte é `posicao_titulos_pagar_atual`.
+- `scripts/refined/negociacao/send_perfil_contraparte.py` —
+  Python + Spark, ~280 linhas. Lê as duas tabelas (AR + AP, max dt_ref),
+  agrupa por (tenant, empresa, filial), POST batches de até 5000 records
+  em `/api/v1/datalake/ingest/counterpart-profiles` com retry
+  exponencial via tenacity. Reusa o padrão de
+  `send_accounts_receivable.py` (`_build_context_lookup`,
+  `_resolve_context`, `_make_batch_id`).
+- `dags/refined/refined_perfil_contraparte.py` — Airflow DAG, ~165 linhas.
+  Tasks `create_perfil_contraparte_ar` + `create_perfil_contraparte_ap`
+  + `load_tenant_config` rodam em paralelo, todas convergem em
+  `send_perfil_contraparte`. Schedule diário 05:00, `is_paused_upon_creation=True`.
+
+Decisões pontuais:
+
+- **Heurísticas em SQL Spark puro** (não PySpark DataFrame API) — fica
+  legível, facilita revisão pelo time financeiro pra calibrar fórmula.
+- **Enriquecimento de `ultima_negociacao_resultado` é opcional** — usa
+  `MERGE INTO` quando `fato_negociacao_agente` existe e tem linhas; em
+  ambiente sem agente rodando, coluna fica vazia (sem erro).
+- **`qtd_titulos_pagos=0`** na v0 — derivar de `fato_movimentos`
+  (histórico de baixas) entra como TODO, não bloqueia o pipeline.
+- **`tier estrategico` por classificação AP (BENS/MATERIA_PRIMA)** ficou
+  pra v2 — coluna não está em `posicao_titulos_pagar_atual`. Hoje o
+  critério é só `valor_aberto_total > R$200k`.
+- **`em_protesto` AP sempre `False`** — Quanttix paga; conceito de
+  protesto do nosso lado não se aplica.
+- **DAG roda em paralelo** AR/AP/load_config — todos independentes,
+  convergem só em `send_perfil_contraparte`.
+
+Pendências do estágio (smoke ⏳ no POD):
+
+- Migration do backend aplicada antes (depende do Estágio 3)
+- DAG `refined_perfil_contraparte` aparece na UI Airflow
+- Trigger manual: cria tabelas refined, popula `Counterpart` no backend
+- Validar stats de tier/score plausíveis para dataset real
+- Calibrar fórmulas com o time financeiro depois da primeira execução
+- Derivar `qtd_titulos_pagos` de `fato_movimentos` (TODO documentado)
 
 ---
 
