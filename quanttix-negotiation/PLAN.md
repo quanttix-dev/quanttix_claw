@@ -13,7 +13,8 @@
 |---|---|---|
 | 1 | Política de Negociação (Playbook) | CONCLUÍDO |
 | 2 | Skill / Persona do Agente | CONCLUÍDO |
-| 3 | Endpoints REST — Tools de leitura | NÃO INICIADO |
+| 3 | Endpoints REST + Models de Negociação (backend) | CONCLUÍDO |
+| 3.5 | Pipeline data_eng — perfil_contraparte (refined→POST) | NÃO INICIADO |
 | 4 | Guardrails — validação determinística | NÃO INICIADO |
 | 5 | Endpoints REST — Tools de escrita + audit | NÃO INICIADO |
 | 6 | Backend Dispatch Endpoint (SSE) | NÃO INICIADO |
@@ -249,106 +250,488 @@ system prompt; o policy.yaml entra como contexto dinâmico via tool.
 
 ---
 
-## Estágio 3: Endpoints REST — Tools de leitura
+## Estágio 3: Endpoints REST + Models de Negociação (backend)
 
 **Repo**: `quanttix_backend`
-**Bloqueia**: Estágios 5, 8
+**Branch**: `agentic_flow_cnab`
+**Bloqueia**: Estágios 4, 5, 8
 **Depende de**: Estágios 1 e 2
-**Status**: NÃO INICIADO
+**Status**: CONCLUÍDO (2026-05-10)
 
 ### Objetivo
-Expor as capacidades de **consulta** ao agente como endpoints REST
-no router existente do backend. Tanto `quanttix_ai` quanto `quanttix_claw`
-consomem via HTTPS + JWT (mesmo padrão já usado em
-`quanttix_api_client.py`). Sem efeitos colaterais — apenas leitura.
+Criar a estrutura transacional do agente no backend Django: 4 models de
+negociação (`Counterpart`, `Negotiation`, `NegotiationEvent`,
+`EscalationTicket`), 3 endpoints REST de leitura para o agente consumir,
+1 endpoint POST de ingestão para o pipeline data_eng do Estágio 3.5
+alimentar os perfis de contraparte, e role de serviço dedicada
+(`ROLE_AGENT_SERVICE`).
 
-### Por que REST
-Topologia atual: backend roda em private network (VPC), `quanttix_ai` e
-`quanttix_claw` rodam juntos no Server X (POD com GPUs). A comunicação
-cross-zone já passa por HTTPS + JWT service account — duplicar isso com
-outro protocolo não traz ganho de segurança. Seguimos REST (Django Ninja,
-mesmo padrão dos endpoints `treasury/api_*`).
+### Decisões de arquitetura (2026-05-10, após análise a fundo)
+
+Após inspecionar `quanttix_ai`, `quanttix_data_eng` e o OpenAPI de
+produção, **o plano original foi reformatado**. Descobertas chave:
+
+1. **`GET /titles/{title_id}` NÃO é criado.** O `quanttix_ai` já consome
+   `/api/v1/tesouraria/contas-receber/fluxos` e `/contas-pagar/documentos`
+   (existentes em produção) via [QuanttixApiClient](https://test.quanttix.com.br/api/docs).
+   `get_fluxos_ar` retorna `active_flows` com `id (UUID)`, `client`,
+   `title_id` (ERP), `amount`, `due_date`, `days_overdue` por título.
+   Criar `/negotiation/titles/{id}` seria duplicação. O agente claw recebe
+   o título já enriquecido via handoff (Estágio 7), sem precisar buscar
+   sozinho no backend.
+
+2. **`GET /counterparts/{documento}` SIM é criado**, mas **não auto-cria**.
+   Counterpart é populada pelo pipeline data_eng (Estágio 3.5) via POST
+   ingest. Se o agente buscar e não achar, retorna 404 honesto. Curadoria
+   manual via Django admin para casos especiais.
+
+3. **AR/AP no Postgres NÃO ganham `client_document`/`supplier_document`.**
+   O cnpj/cpf já existe em `quanttix.protheus.refined.finance.posicao_titulos_receber_atual`
+   (Iceberg). O pipeline data_eng (Estágio 3.5) extrai daí e popula
+   `Counterpart` no Postgres. Mudar o schema de AR/AP exigiria mexer
+   nos endpoints `/datalake/ingest/accounts-{payable,receivable}` que
+   estão em produção — fica como melhoria separada e opcional.
+
+4. **Models `Negotiation`, `NegotiationEvent`, `EscalationTicket`** são
+   criados aqui (não esperam Estágio 5) para destravar os guardrails do
+   Estágio 4 e ter estado transacional consistente desde o início. O
+   Estágio 5 só **escreve** neles via endpoints POST.
+
+5. **Audit durável** (Estágio 4) usa as colunas `guardrail_motivo` e
+   `regra_aplicada_id` que já estão modeladas em `NegotiationEvent` aqui.
+   Não duplica tabela.
+
+6. **Código órfão detectado** em `quanttix_data_eng/scripts/refined/negociacao/send_negociacao_data.py`:
+   tenta `POST /api/v1/datalake/negotiation-snapshot` que **não existe no
+   backend**. Pendência separada — vou flagar como melhoria futura (não
+   bloqueador do agente), eventualmente vira `/datalake/ingest/negotiation-metrics-snapshot`.
 
 ### Entregáveis
-- `src/treasury/api_negotiation.py` (router Ninja, rotas read)
-- `src/treasury/services/negotiation_service.py` (queries)
-- `src/treasury/schemas/negotiation.py` (Pydantic responses)
-- `tests/treasury/test_api_negotiation_read.py`
+
+- `src/treasury/models.py` ou `src/treasury/models_negotiation.py` —
+  4 models novos
+- `src/treasury/migrations/00XX_negotiation_models.py` — migration
+- `src/treasury/admin.py` ou `src/treasury/admin_negotiation.py` —
+  Django admin
+- `src/treasury/schemas/negotiation.py` — Pydantic responses
+- `src/treasury/schemas/datalake.py` — schemas de ingest
+  `CounterpartProfileIngestItem` + `CounterpartProfileIngestRequest`
+- `src/treasury/services/negotiation_service.py` — queries
+- `src/treasury/services/ingestion_service.py` — método
+  `ingest_counterpart_profiles` adicionado
+- `src/treasury/api_negotiation.py` — router com 3 GETs
+- `src/treasury/api_datalake.py` — POST `/datalake/ingest/counterpart-profiles`
+  adicionado
+- `src/treasury/api.py` — montagem do `negotiation_router`
+- `src/authentication/models.py` — `ROLE_AGENT_SERVICE` em `UserTenantRole`
+- `src/treasury/tests/test_api_negotiation_read.py` — testes pytest
 
 ### Subtarefas
-- [ ] Criar router `api_negotiation.py` mountado em
-      `/api/v1/tesouraria/negotiation/` (segue convenção de `api_cnab.py`)
-- [ ] Endpoint `GET /titles/{title_id}` → `TitleDetails`
-- [ ] Endpoint `GET /counterparts/{documento}` → `CounterpartProfile`
-- [ ] Endpoint `GET /policy?title_id&counterpart_doc` → `PolicyDecision`
-      (chama policy engine do Estágio 1 — importa do pacote
-      `extensions/quanttix-negotiation/policy/` ou copia como lib)
-- [ ] Endpoint `GET /open-negotiations?counterpart_doc=...` →
-      `list[OpenNegotiation]` (lê de `quanttix.simulation.negociacao.evento`)
-- [ ] Autenticação — modelo restritivo:
-  - JWT service account (já existe `_extract_tenant_context` em `treasury/api.py`)
-  - Tokens distintos por cliente: contas `svc_quanttix_ai` e
-    `svc_quanttix_claw` com permissões mínimas (leitura nos endpoints
-    de negociation + escrita no Estágio 5)
-  - Log de toda chamada com `client_id` (audit operacional via Redis,
-    Estágio 4) — recurso já existe via `_get_client_ip` + tenant context
-  - Rate limit por `client_id` (separado do rate limit por contraparte)
-- [ ] Schemas Pydantic alinhados com os contratos abaixo
-- [ ] Teste por endpoint com fixture de DB
-- [ ] Teste de integração: `httpx.AsyncClient` autenticado via JWT
-- [ ] Documentar endpoints em `docs/api/negotiation.md` + OpenAPI auto-gen
 
-### Contratos das tools
+- [x] Criar 4 models: `Counterpart`, `Negotiation`, `NegotiationEvent`,
+      `EscalationTicket` (todos com `TreasuryBaseModel` base — tenant,
+      empresa, filial)
+- [x] Adicionar `ROLE_AGENT_SERVICE` em `UserTenantRole`
+- [x] Gerar migration Django para os 4 models + role
+- [x] Criar Django admin para os 4 models (read-mostly para Negotiation*,
+      editable para Counterpart)
+- [x] Criar schemas Pydantic de response em `treasury/schemas/negotiation.py`:
+      `CounterpartResponse`, `OpenNegotiationItem`, `OpenNegotiationsResponse`,
+      `PolicyDecisionResponse`
+- [x] Criar schemas Pydantic de ingest em `treasury/schemas/datalake.py`:
+      `CounterpartProfileIngestItem`, `CounterpartProfileIngestRequest`
+- [x] Criar `treasury/services/negotiation_service.py` com 3 queries:
+      `get_policy_decision(title_id, counterpart_doc, tenant_ctx)`,
+      `get_counterpart_by_documento(documento, tenant_ctx)`,
+      `list_open_negotiations(counterpart_doc, tenant_ctx)`
+- [x] Adicionar `ingest_counterpart_profiles` em
+      `treasury/services/ingestion_service.py` (upsert por
+      `(tenant, documento)`, max 5000 records/batch padrão)
+- [x] Criar `treasury/api_negotiation.py` (router Ninja) com 3 GETs:
+      `/policy`, `/counterparts/{documento}`, `/open-negotiations`
+- [x] Adicionar `POST /datalake/ingest/counterpart-profiles` em
+      `treasury/api_datalake.py` com auth `DataLakeApiKeyAuth` (padrão)
+- [x] Montar `negotiation_router` em `treasury/api.py` sob
+      `/api/v1/tesouraria/negotiation`
+- [x] Testes pytest em `treasury/tests/test_api_negotiation_read.py`:
+      policy retorna AR-padrao, policy bloqueia em protesto, counterpart
+      404 quando ausente, counterpart 200 quando ingerida, open-negotiations
+      vazia, open-negotiations com 1 item após criar Negotiation
+- [x] ~~`GET /titles/{title_id}`~~ — **obsoleta**: usar
+      `/contas-receber/fluxos` ou `/contas-pagar/documentos` existentes
+- [x] ~~`get_counterpart` auto-create com defaults~~ — **obsoleta**:
+      counterpart populada via ingest do Estágio 3.5; 404 honesto se ausente
+- [x] ~~Schema de AR/AP ganha `client_document`/`supplier_document`~~ —
+      **obsoleta**: documento vem do Iceberg → pipeline → `Counterpart`
+      table sem alterar `AccountReceivable`/`AccountPayable`
+
+### Contratos
 
 ```python
-class TitleDetails(BaseModel):
-    title_id: str
-    tipo_titulo: Literal["AR", "AP"]
-    valor_original: Decimal
-    valor_atualizado: Decimal       # com juros até hoje
-    dt_emissao: date
-    dt_vencimento: date
-    dias_atraso: int                # 0 se em dia
-    counterpart_doc: str
-    counterpart_nome: str
-    status: str
+# Models (Django) — simplificados, ver código real para constraints e indexes
 
-class CounterpartProfile(BaseModel):
+class Counterpart(TreasuryBaseModel):
+    documento = CharField(max_length=20)          # cpf ou cnpj (apenas dígitos)
+    nome = CharField(max_length=200)
+    tipo_titulo = CharField(choices=["AR","AP"])  # mesmo documento pode aparecer dos dois lados
+    tier = CharField(choices=["vip","padrao","risco","estrategico"], default="padrao")
+    score = IntegerField(0..1000, default=500)
+    em_protesto = BooleanField(default=False)
+    qtd_titulos_pagos = IntegerField(default=0)
+    qtd_atrasos = IntegerField(default=0)
+    historico_atrasos_pct = DecimalField(0..100, default=0)
+    valor_aberto_total = DecimalField(default=0)
+    ultima_negociacao_resultado = CharField(null=True, blank=True)
+    fonte = CharField(choices=["datalake","manual"], default="datalake")
+    dt_ref = DateField()                          # data do snapshot quando fonte=datalake
+    # Unique: (tenant, empresa, filial, documento, tipo_titulo)
+
+class Negotiation(TreasuryBaseModel):
+    negociacao_id = CharField(unique=True)        # UUID gerado no primeiro propose
+    title_id = CharField()                        # title_id ERP (ex: SE1-001)
+    title_uuid_ref = UUIDField(null=True)         # AccountReceivable.id ou AccountPayable.id
+    tipo_titulo = CharField(choices=["AR","AP"])
+    counterpart = ForeignKey(Counterpart, on_delete=PROTECT)
+    status_atual = CharField(choices=["ABERTA","ACEITA","RECUSADA","EXPIRADA","ESCALADA","BLOQUEADA"])
+    dt_criacao = DateTimeField()
+    dt_expiracao = DateTimeField(null=True)
+    rodada_atual = IntegerField(default=0)
+    # Indexes: (tenant, counterpart, status_atual), (tenant, title_id)
+
+class NegotiationEvent(TreasuryBaseModel):
+    evento_id = CharField(unique=True)            # UUID por evento
+    negociacao = ForeignKey(Negotiation, on_delete=PROTECT, related_name="eventos")
+    status_evento = CharField(choices=["PROPOSTA","CONTRAPROPOSTA","ACEITA","RECUSADA","EXPIRADA","ESCALADA","BLOQUEADA"])
+    terms = JSONField(default=dict)               # NegotiationTerms (Estágio 5)
+    dt_evento = DateTimeField()
+    expira_em = DateTimeField(null=True)
+    guardrail_motivo = CharField(null=True, blank=True)
+    regra_aplicada_id = CharField(null=True, blank=True)  # rule.id da policy
+    idempotency_key = CharField(unique=True)      # (tenant, negociacao_id, status, terms hash)
+
+class EscalationTicket(TreasuryBaseModel):
+    ticket_id = CharField(unique=True)
+    negociacao = ForeignKey(Negotiation, on_delete=PROTECT, related_name="tickets")
+    reason = CharField(max_length=100)            # códigos padronizados (ver SKILL.md)
+    context = JSONField(default=dict)
+    status = CharField(choices=["aberto","aprovado","recusado"], default="aberto")
+    dt_criacao = DateTimeField()
+    dt_resolucao = DateTimeField(null=True)
+    nota_resolucao = TextField(blank=True)
+```
+
+```python
+# REST — Pydantic responses (treasury/schemas/negotiation.py)
+
+class PolicyDecisionResponse(BaseModel):
+    allowed: bool
+    matched_rule_id: str
+    max_desconto_pct: Decimal | None
+    max_parcelas: int | None
+    max_prazo_dias_extra: int | None
+    juros_mensal_min_pct: Decimal | None
+    escalation_threshold_pct: Decimal | None
+    bloqueio_motivo: str | None
+    # Defaults globais expostos junto p/ o agente não precisar 2ª chamada:
+    expiracao_proposta_horas: int
+    rodada_maxima: int
+    max_propostas_por_dia_por_contraparte: int
+
+class CounterpartResponse(BaseModel):
     documento: str
     nome: str
-    tier: Literal["vip", "padrao", "risco"]
-    score: int                      # 0-1000
+    tipo_titulo: Literal["AR", "AP"]
+    tier: str
+    score: int
     em_protesto: bool
-    historico_pagamentos: int       # qtd títulos pagos
+    qtd_titulos_pagos: int
+    qtd_atrasos: int
     historico_atrasos_pct: Decimal
     valor_aberto_total: Decimal
     ultima_negociacao_resultado: str | None
+    fonte: Literal["datalake", "manual"]
+    dt_ref: date
 
-class OpenNegotiation(BaseModel):
+class OpenNegotiationItem(BaseModel):
     negociacao_id: str
     title_id: str
-    status_evento: str
-    dt_proposta: datetime
+    tipo_titulo: Literal["AR", "AP"]
+    status_atual: str
+    dt_criacao: datetime
     dt_expiracao: datetime | None
-    valor_proposto: Decimal | None
-    desconto_proposto_pct: Decimal | None
+    rodada_atual: int
+    ultimo_status_evento: str | None
+    ultimo_terms: dict | None
+
+class OpenNegotiationsResponse(BaseModel):
+    items: list[OpenNegotiationItem]
+    total: int
+```
+
+```python
+# Ingest — schema (treasury/schemas/datalake.py)
+
+class CounterpartProfileIngestItem(BaseModel):
+    documento: str = Field(min_length=11, max_length=20)
+    nome: str
+    tipo_titulo: Literal["AR", "AP"]
+    tier: str
+    score: int = Field(ge=0, le=1000)
+    em_protesto: bool = False
+    qtd_titulos_pagos: int = Field(ge=0, default=0)
+    qtd_atrasos: int = Field(ge=0, default=0)
+    historico_atrasos_pct: Decimal = Field(ge=0, le=100, default=Decimal("0"))
+    valor_aberto_total: Decimal = Field(ge=0, default=Decimal("0"))
+    ultima_negociacao_resultado: str | None = None
+
+class CounterpartProfileIngestRequest(BaseModel):
+    tenant_id: UUID
+    empresa_id: UUID
+    filial_id: UUID
+    dt_ref: date
+    batch_id: str
+    records: list[CounterpartProfileIngestItem] = Field(min_length=1, max_length=5000)
+```
+
+### Endpoints expostos
+
+| Método | Path | Auth | Função |
+|---|---|---|---|
+| `GET` | `/api/v1/tesouraria/negotiation/policy?title_id&counterpart_doc` | JWT + role | Resolve `PolicyDecision` |
+| `GET` | `/api/v1/tesouraria/negotiation/counterparts/{documento}?tipo_titulo=AR\|AP` | JWT + role | Lê `Counterpart` |
+| `GET` | `/api/v1/tesouraria/negotiation/open-negotiations?counterpart_doc=...` | JWT + role | Lista `Negotiation` em estados não-terminais |
+| `POST` | `/api/v1/datalake/ingest/counterpart-profiles` | DataLakeApiKeyAuth | Upsert de `Counterpart` em batch (Estágio 3.5 chama) |
+
+### Critério de aceite
+
+- `pytest src/treasury/tests/test_api_negotiation_read.py` passa (code ✅
+  — sintaxe validada local; execução exige Django no POD ⏳)
+- Migration aplicada sem erro (smoke ⏳ — POD)
+- Admin Django mostra os 4 models (smoke ⏳ — POD)
+- OpenAPI lista os 4 endpoints em `/api/v1/docs` (smoke ⏳ — POD)
+- Chamada autenticada via `quanttix_api_client.py` funciona (smoke ⏳ — POD)
+- Latência de cada GET < 300ms (smoke ⏳ — POD)
+
+### Implementação (2026-05-10)
+
+Arquivos criados em `quanttix_backend@agentic_flow_cnab`:
+
+- `src/treasury/models_negotiation.py` — 4 models (`Counterpart`,
+  `Negotiation`, `NegotiationEvent`, `EscalationTicket`). Importado no
+  fim de `src/treasury/models.py` para Django descobrir.
+- `src/treasury/migrations/0010_negotiation_models.py` — migration
+  manual (CreateModel + Historical* + AddIndex + AddConstraint +
+  AlterField em `DataLakeIngestion.entity` para `counterpart_profiles`).
+  Escrita seguindo o padrão da `0008_boleto_emission.py`. **Deve ser
+  regenerada via `makemigrations` no POD se os models forem alterados.**
+- `src/authentication/migrations/0003_add_agent_service_role.py` —
+  adiciona choice `agent_service` ao campo `role` de `UserTenantRole`
+  e `HistoricalUserTenantRole`.
+- `src/treasury/admin_negotiation.py` — Django admin: `Counterpart`
+  editável (curadoria manual), `Negotiation` read-mostly, `NegotiationEvent`
+  read-only (append-only), `EscalationTicket` editável só em
+  `status`/`nota_resolucao` (workflow humano). Registrado via
+  `@admin.register` e linkado em `admin.py` por import.
+- `src/treasury/schemas/negotiation.py` — `PolicyDecisionResponse`,
+  `CounterpartResponse`, `OpenNegotiationItem`, `OpenNegotiationsResponse`.
+- `src/treasury/schemas/datalake.py` — adicionados
+  `CounterpartProfileIngestItem` (com validators de documento e tier)
+  e `CounterpartProfileIngestRequest` (max 5000 records/batch).
+- `src/treasury/services/negotiation_service.py` — 3 queries
+  (`get_policy_decision`, `get_counterpart_by_documento`,
+  `list_open_negotiations`), `NegotiationServiceError` com códigos,
+  loader de policy sem cache na v0.
+- `src/treasury/services/ingestion_service.py` — `ingest_counterpart_profiles`
+  adicionado seguindo o padrão de `ingest_accounts_payable`.
+- `src/treasury/api_negotiation.py` — router Ninja com 3 GETs
+  (`/policy`, `/counterparts/{documento}`, `/open-negotiations`),
+  decorators `@require_tenant_access` + `@require_any_role(NEGOTIATION_ROLES)`
+  com `ROLE_AGENT_SERVICE` incluído.
+- `src/treasury/api_datalake.py` — endpoint POST
+  `/api/v1/datalake/ingest/counterpart-profiles` adicionado.
+- `src/treasury/api.py` — `negotiation_router` montado em
+  `/api/v1/tesouraria/negotiation`.
+- `src/authentication/models.py` — `UserTenantRole.ROLE_AGENT_SERVICE`
+  adicionado.
+- `src/treasury/tests/test_api_negotiation_read.py` — 11 testes pytest
+  (4 cenários de policy + 3 de counterpart + 4 de open-negotiations).
+  Sintaxe validada local; **execução exige Django no POD**.
+
+Decisões de implementação:
+
+- **Models e migration**: usei funções nomeadas (`_default_negociacao_id`,
+  etc.) em vez de lambda no `default=` porque lambdas não serializam
+  em migrations Django.
+- **Audit no `NegotiationEvent`**: campos `guardrail_motivo` e
+  `regra_aplicada_id` direto na linha do evento — sem tabela separada,
+  exatamente como Apêndice A do plano define.
+- **`AccountReceivable`/`AccountPayable` intocados** — adicionar
+  `client_document`/`supplier_document` exigiria mudar os ingest
+  endpoints em produção (`/datalake/ingest/accounts-{payable,receivable}`),
+  fora do escopo. Documento de contraparte vem direto do pipeline
+  `perfil_contraparte_*` (Estágio 3.5) para a tabela `Counterpart`.
+- **Sem cache de policy** na v0 — `load_policy()` a cada GET. Quando
+  vira gargalo, plug Redis-cache com TTL curto.
+- **`load_policy` permite override** via `settings.NEGOTIATION_POLICY_PATH`
+  para testes injetarem YAML alternativo (não usado nos testes atuais,
+  mas suportado).
+- **`DataLakeIngestion.EntityType`** ganhou `COUNTERPART_PROFILES` —
+  migration inclui `AlterField` para refletir nas choices do campo
+  `entity`.
+
+Pendências do estágio:
+
+- Smoke no POD: aplicar migration, popular Counterpart manualmente via
+  admin, chamar os 3 GETs com JWT do `svc_quanttix_ai` ou `svc_quanttix_claw`,
+  validar contratos
+- Criar contas de serviço `svc_quanttix_ai@quanttix.com` e
+  `svc_quanttix_claw@quanttix.com` com `ROLE_AGENT_SERVICE` (manual
+  via admin ou seed script)
+- Adicionar wrappers no `quanttix_api_client.py` para os 3 GETs novos
+  (não bloqueador deste estágio — pode entrar quando o claw começar a
+  consumir)
+
+### Notas de implementação
+
+- Counterpart vazia até o Estágio 3.5 rodar — endpoints retornam 404 ou
+  lista vazia; testes locais usam fixtures pra popular
+- `policy` carrega `negotiation_policy.yaml` operacional (já em
+  `src/treasury/config/`) via `policy_engine.load_policy` — sem cache;
+  evolução: redis-cache com TTL curto quando virar produção
+- `open-negotiations` retorna negociações com `status_atual` em
+  `ABERTA|ESCALADA` (não-terminais); ordenação por `dt_criacao` desc
+- `ingest_counterpart_profiles` faz upsert atomic; cada record processado
+  individualmente para que erros parciais não derrubem o batch — devolve
+  `processed_count`, `error_count`, `errors[]` no payload de resposta
+- Os 9 nomes de tools listados no `SKILL.md` Estágio 2:
+  - `get_title`, `get_counterpart`, `get_negotiation_policy`,
+    `list_open_negotiations` (leitura)
+  - `propose_negotiation`, `counterproposal_negotiation`,
+    `accept_negotiation`, `reject_negotiation`, `escalate_negotiation`
+    (escrita — Estágio 5)
+  - `get_title` será uma **tool local do claw** (Estágio 7) que olha
+    o payload do handoff; não vira endpoint REST aqui
+  - `get_counterpart`, `get_negotiation_policy`, `list_open_negotiations`
+    mapeiam 1-to-1 nos 3 GETs deste estágio
+
+---
+
+## Estágio 3.5: Pipeline data_eng — perfil_contraparte (refined→POST)
+
+**Repo**: `quanttix_data_eng`
+**Branch**: `developer_flow`
+**Bloqueia**: nenhuma fase em si (mas habilita dados reais para 4-8)
+**Depende de**: Estágio 3 (endpoint POST + model `Counterpart` precisam existir)
+**Status**: NÃO INICIADO
+**Pode rodar em paralelo com**: Estágios 4, 5, 6 (não bloqueante)
+
+### Objetivo
+Calcular o perfil enriquecido de cada contraparte (tier, score,
+em_protesto, histórico) por tenant a partir das tabelas refined que já
+existem no Iceberg, e empurrar pro backend via POST. Sem o pipeline,
+`Counterpart` no Postgres fica vazia e endpoints do Estágio 3 retornam
+404 ou lista vazia — agente opera com defaults manuais cadastrados via
+Django admin.
+
+### Por que existir
+O `quanttix_data_eng` já tem todo o pipeline raw→trusted→refined para
+títulos AR e AP, incluindo:
+- `protheus.refined.finance.posicao_titulos_receber_atual` (com cpf_cnpj)
+- `protheus.refined.finance.posicao_cliente_atual` (agregado por cliente,
+  com `maior_atraso_dias`, `qtd_titulos_abertos`, `total_valor_pendente`)
+- `protheus.refined.finance.posicao_fornecedor_atual` (equivalente AP)
+- `protheus.trusted.finance_negotiation.fato_negociacao_agente`
+  (eventos históricos do agente — quando começar a popular após Estágio 5)
+
+O que falta é a tabela **`perfil_contraparte`** que junta esses dados e
+calcula `tier`, `score`, `em_protesto`. É o último estágio refined.
+
+### Entregáveis
+- `scripts/refined/negociacao/create_perfil_contraparte_ar.py`
+- `scripts/refined/negociacao/create_perfil_contraparte_ap.py`
+- `scripts/refined/negociacao/send_perfil_contraparte.py`
+- `dags/refined/dag_perfil_contraparte.py`
+
+### Subtarefas
+- [ ] `create_perfil_contraparte_ar.py`: PySpark, JOIN
+      `posicao_titulos_receber_atual` × `posicao_cliente_atual` ×
+      `fato_negociacao_agente` (histórico). Calcula tier/score/em_protesto
+      via heurística inicial. Grava em
+      `quanttix.protheus.refined.finance_negotiation.perfil_contraparte_ar`
+- [ ] `create_perfil_contraparte_ap.py`: equivalente para fornecedores,
+      usando `posicao_titulos_pagar_atual` × `posicao_fornecedor_atual`.
+      Grava em `...finance_negotiation.perfil_contraparte_ap`
+- [ ] `send_perfil_contraparte.py`: lê as 2 tabelas, agrupa por tenant,
+      POST batch ao backend em
+      `POST /api/v1/datalake/ingest/counterpart-profiles` com auth
+      `X-DataLake-Api-Key` (padrão existente). Reusa `_build_context_lookup`
+      e `_resolve_context` do `send_accounts_receivable.py`
+- [ ] DAG: orquestra `create_ar → create_ap → send` em sequência,
+      agendado diário (após DAGs de `posicao_atual` AR/AP)
+- [ ] Heurísticas iniciais (documentar — vão evoluir):
+  - **tier**: AR — `vip` se valor_aberto_total > R$500k OU
+    nome em whitelist; `risco` se em_protesto OR score < 300; senão
+    `padrao`. AP — `estrategico` se valor_aberto_total > R$200k OU
+    classificado como `BENS`/`MATERIA_PRIMA`; senão `padrao`
+  - **score** (0-1000): `1000 - min(maior_atraso_dias × 5, 700) -
+    min(historico_atrasos_pct × 3, 200)` (range típico 200-1000)
+  - **em_protesto**: AR — se `maior_atraso_dias > 180` E
+    `historico_atrasos_pct > 50%`. AP — `False` (Quanttix paga; protesto
+    do nosso lado não faz sentido aqui)
+  - **historico_atrasos_pct**: `qtd_atrasos / max(qtd_titulos_total, 1) × 100`
+- [ ] Testes locais (PySpark com fixtures de DataFrame): code ✅
+- [ ] Smoke no POD: DAG roda, POST chega no backend, registros aparecem
+      em `Counterpart` table: ⏳
+
+### Contrato — payload do POST
+
+Cada chamada envia 1 batch por tenant/dt_ref:
+
+```http
+POST /api/v1/datalake/ingest/counterpart-profiles
+Headers: X-DataLake-Api-Key, X-Tenant-Id, Content-Type
+Body:
+{
+  "tenant_id": "uuid",
+  "empresa_id": "uuid",
+  "filial_id": "uuid",
+  "dt_ref": "2026-05-10",
+  "batch_id": "perfil-contraparte-2026-05-10",
+  "records": [
+    {
+      "documento": "12345678000199",
+      "nome": "Cliente Exemplo S.A.",
+      "tipo_titulo": "AR",
+      "tier": "padrao",
+      "score": 720,
+      "em_protesto": false,
+      "qtd_titulos_pagos": 47,
+      "qtd_atrasos": 8,
+      "historico_atrasos_pct": 17.02,
+      "valor_aberto_total": 124500.00,
+      "ultima_negociacao_resultado": null
+    }
+  ]
+}
+→ 200 {"processed_count": 1, "error_count": 0, "errors": []}
 ```
 
 ### Critério de aceite
-- `pytest tests/treasury/test_api_negotiation_read.py` passa
-- OpenAPI lista os 4 endpoints em `/api/v1/docs`
-- Chamar via `quanttix_api_client.py` autenticado funciona (smoke test)
-- Latência de cada endpoint < 300ms em ambiente de dev
+- Scripts rodam local com DataFrames de fixture (code ✅ — `pytest` no
+  `quanttix_data_eng` se houver test runner) ou `python -c` smoke
+- DAG aparece na UI do Airflow no POD (smoke ⏳)
+- 1 execução completa popula `Counterpart` table no backend (smoke ⏳)
+- Heurísticas geram tiers/scores plausíveis para dataset real (smoke ⏳)
 
 ### Notas de implementação
-- Para `GET /titles/{id}` e `GET /counterparts/{doc}`, fonte primária são
-  as tabelas Iceberg via Trino (já existe acesso em `src/treasury/`)
-- Cuidado com cache: dados de título mudam (juros calculados na hora)
-- `GET /open-negotiations` lê de `quanttix.simulation.negociacao.evento`
-  e agrega por `negociacao_id` (último evento vence)
-- O cliente do lado `quanttix_ai` estende `quanttix_api_client.py`;
-  o cliente do lado `quanttix_claw` é um plugin TS novo
-  (`extensions/quanttix-negotiation/src/client.ts`) usando `fetch`+JWT
+- Heurísticas atuais são **chute educado**, vão precisar de calibragem
+  com dados reais. Documentar fórmula no docstring do script para
+  facilitar revisão posterior pelo time financeiro
+- Tabela `perfil_contraparte_*` é write-only por dt_ref (snapshot
+  diário); backend faz upsert por `(tenant, documento, tipo_titulo)`
+  então a última carga vence
+- Nada nesta etapa modifica AR/AP existentes — pipeline complementar,
+  não substitui
 
 ---
 
