@@ -68,6 +68,25 @@ Bots Telegram (dois, funcoes distintas):
 | `quanttix_ai` | `developer_cpp` | `NegotiationOrchestrator` vira fallback (não é mais primário) |
 | `quanttix_data_eng` | `developer_flow` | Já contém DAGs `sim_*` — sem mudanças nesta fase |
 
+## Ambiente — local-dev vs servidor
+
+O ambiente local do usuário é apenas dev. Coisas que dependem de Django,
+DB, Trino, Redis, Airflow ou GPUs **não rodam local** — só no servidor
+(POD RunPod). Quando estiver implementando uma subtarefa:
+
+- **Pode validar local**: sintaxe Python, testes unitários sem Django,
+  parsing de YAML/JSON, estrutura de arquivos, type-checking puro
+- **Não tente local**: subir Django, conectar DB, rodar OpenClaw gateway,
+  smoke test em endpoints REST, disparar DAG do Airflow, chamar Telegram
+
+Para subtarefas que exigem ambiente real, marque o código como pronto e
+peça ao usuário pra rodar o smoke no servidor. **Não invente dados de
+teste só pra "passar local" se a validação real só faz sentido no POD.**
+
+Convenção sugerida nas subtarefas de Estágios que envolvem REST/integração:
+escrever os checks como `code ✅` (feito local) e `smoke ⏳` (pendente
+servidor). Isso já está aplicado a partir do Estágio 3.
+
 ## Como retomar este plano
 
 Se a sessão atual for interrompida (créditos, troca de conta, novo dia):
