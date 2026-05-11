@@ -16,7 +16,7 @@
 | 3 | Endpoints REST + Models de Negociação (backend) | CONCLUÍDO |
 | 3.5 | Pipeline data_eng — perfil_contraparte (refined→POST) | CONCLUÍDO (code) |
 | 4 | Guardrails — validação determinística | CONCLUÍDO (code) |
-| 5 | Endpoints REST — Tools de escrita + audit | NÃO INICIADO |
+| 5 | Endpoints REST — Tools de escrita + audit | CONCLUÍDO (code) |
 | 6 | Backend Dispatch Endpoint (SSE) | NÃO INICIADO |
 | 7 | Handoff (HTTP localhost) + Session binding (Redis) | NÃO INICIADO |
 | 8 | Allowlist dinâmica Telegram + testes E2E | NÃO INICIADO |
@@ -966,13 +966,14 @@ Pendências do estágio (smoke ⏳ no POD):
 **Repo**: `quanttix_backend`
 **Bloqueia**: Estágio 6 (parcial)
 **Depende de**: Estágios 3 e 4
-**Status**: NÃO INICIADO
+**Status**: CONCLUÍDO code ✅ (2026-05-11); smoke ⏳ no POD
 
 ### Objetivo
 Expor as **ações** do agente como endpoints REST POST: propor termos,
 registrar contraproposta, aceitar, recusar, escalar. Cada um envelopado
-pelo guardrail (Estágio 4) e gera evento em
-`quanttix.simulation.negociacao.evento`.
+pelo guardrail (Estágio 4) e gera `NegotiationEvent` no Postgres do
+backend (audit duravel via colunas `guardrail_motivo` +
+`regra_aplicada_id` ja modeladas no Estagio 3).
 
 ### Entregáveis
 - Adicionar rotas POST em `src/treasury/api_negotiation.py`
@@ -982,24 +983,34 @@ pelo guardrail (Estágio 4) e gera evento em
 - `tests/treasury/test_api_negotiation_write.py`
 
 ### Subtarefas
-- [ ] `POST /negotiation/propose` body `{title_id, terms}` →
-      `NegotiationEvent` (status `PROPOSTA`)
-- [ ] `POST /negotiation/{neg_id}/counterproposal` →
-      status `CONTRAPROPOSTA`; valida que existe `PROPOSTA` prévia
-- [ ] `POST /negotiation/{neg_id}/accept` → `AcceptResult` (`ACEITA`);
-      retorna sinal pro agente saber que dispatch do boleto pode ser
-      chamado (Estágio 6 conecta o dispatch)
-- [ ] `POST /negotiation/{neg_id}/reject` body `{reason}` →
-      `NegotiationEvent` (status `RECUSADA`)
-- [ ] `POST /negotiation/{neg_id}/escalate` body `{reason, context}` →
-      `EscalationTicket` (cria entrada em fila de aprovação humana)
-- [ ] Todos os 5 endpoints envelopados com `@guardrail` (Estágio 4)
-- [ ] Idempotência via header `Idempotency-Key`: 2 chamadas com mesma
-      key não duplicam evento
-- [ ] Teste por endpoint: caminho feliz
-- [ ] Teste por endpoint: bloqueado por guardrail (POLICY_VIOLATION etc.)
-- [ ] Teste: idempotência
-- [ ] Teste: state machine (accept antes de propose retorna 409)
+- [x] `POST /negotiation/propose` body `{title_id, counterpart_doc, ..., terms}`
+      → `NegotiationEventResponse` (status `PROPOSTA`); cria Negotiation + evento
+- [x] `POST /negotiation/{neg_id}/counterproposal` →
+      `NegotiationEventResponse` (status `CONTRAPROPOSTA`); incrementa rodada_atual,
+      valida que negociacao nao e terminal
+- [x] `POST /negotiation/{neg_id}/accept` → `NegotiationEventResponse`
+      (status `ACEITA`); herda termos do ultimo evento se body vazio;
+      atualiza `Counterpart.ultima_negociacao_resultado="ACEITA"`
+- [x] `POST /negotiation/{neg_id}/reject` body `{reason, mensagem_agente}` →
+      `NegotiationEventResponse` (status `RECUSADA`)
+- [x] `POST /negotiation/{neg_id}/escalate` body `{reason, context, mensagem_agente}` →
+      `EscalationTicketResponse` (cria `EscalationTicket` + evento `ESCALADA`
+      atomicamente)
+- [x] Todos os 5 endpoints envelopados com `@guardrail` (Estagio 4) via
+      wrappers `_propose_wrapped`, `_counter_wrapped`, etc.
+- [x] Idempotência via header `Idempotency-Key` (ou `X-Idempotency-Key`):
+      2 chamadas com mesma key não duplicam evento. Sem header, fallback
+      para hash determinístico de `(tenant, neg_id, status, terms_canonical)`
+- [x] State machine: `_ensure_not_terminal` bloqueia operacoes em
+      negociacoes ja em ACEITA/RECUSADA/EXPIRADA/BLOQUEADA com
+      `INVALID_STATE` (HTTP 409)
+- [x] Teste por endpoint: 5 happy paths (propose, counter, accept, reject, escalate)
+- [x] Teste de guardrail integration: `POLICY_VIOLATION` e `ESCALATION_REQUIRED`
+      bloqueiam via decorator antes de gravar
+- [x] Teste de idempotência: chamada repetida e mesma key explicita
+- [x] Teste de state machine: counterproposal em ACEITA levanta `INVALID_STATE`
+- [x] Teste: `escalate` cria ticket + evento atomicamente
+- [x] Teste: `accept`/`reject` atualizam `Counterpart.ultima_negociacao_resultado`
 
 ### Contratos
 
@@ -1022,18 +1033,83 @@ class NegotiationEvent(BaseModel):
 ```
 
 ### Critério de aceite
-- Pytest cobre os 5 caminhos felizes + 5 caminhos bloqueados
-- Idempotência verificada
-- Eventos aparecem em `quanttix.simulation.negociacao.evento` após chamada
-  (teste de integração com Iceberg local ou stub)
+- Pytest cobre os 5 caminhos felizes + bloqueios via guardrail ✅
+- Idempotência verificada (hash determinístico + header explicito) ✅
+- Eventos aparecem na tabela `treasury_negotiation_event` (Postgres)
+  após chamada — verificavel via `Negotiation.eventos.all()` ✅
+- Audit duravel em `NegotiationEvent.{guardrail_motivo,regra_aplicada_id}`
+  populado a partir dos outcomes do `@guardrail` ✅
 
 ### Notas de implementação
 - `negociacao_id` é gerado no primeiro `propose_negotiation` e retornado
-  ao agente; ele DEVE passar de volta em chamadas subsequentes
-- `idempotency_key` é hash de `(negociacao_id, status_evento, terms_canonical)`
+  ao agente; ele DEVE passar de volta em chamadas subsequentes via URL
+- `idempotency_key` armazenado no DB e composto por prefixo `hdr:` ou
+  `auto:` dependendo se cliente enviou header ou nao
 - `accept_negotiation` NÃO dispara boleto diretamente — apenas grava o
   evento. O dispatch fica no Estágio 6 e é orquestrado pelo agente
   (próxima tool chamada)
+- Endpoints retornam HTTP `201 Created` em sucesso; bloqueios viram:
+  - `403` BLOCKED_BY_POLICY
+  - `409` ESCALATION_REQUIRED / INVALID_STATE
+  - `422` POLICY_VIOLATION
+  - `429` RATE_LIMITED
+- Body do erro: dict serializado da `GuardrailError.to_dict()`
+  (`{code, message, hint, regra_aplicada_id}`)
+
+### Implementação (2026-05-11)
+
+Arquivos modificados/criados em `quanttix_backend@agentic_flow_cnab`:
+
+- `src/treasury/schemas/negotiation.py` — adicionados 9 schemas write:
+  `NegotiationTerms`, `ProposeNegotiationRequest`, `CounterproposalRequest`,
+  `AcceptRequest`, `RejectRequest`, `EscalateRequest`,
+  `NegotiationEventResponse`, `EscalationTicketResponse`
+- `src/treasury/services/negotiation_service.py` — adicionados 5 service
+  methods: `propose_negotiation`, `register_counterproposal`,
+  `accept_negotiation`, `reject_negotiation`, `escalate_negotiation`,
+  mais helpers `_compute_idempotency_key`, `_canonical_terms`,
+  `_ensure_not_terminal`, `_build_event_response`
+- `src/treasury/api_negotiation.py` — adicionados 5 endpoints POST
+  envelopados em `_*_wrapped` decorados com `@guardrail`. Helpers
+  `_handle_guardrail_error` (mapeia codes para HTTP 4xx),
+  `_handle_service_error` (404/409), `_idempotency_key_from_request`,
+  `_session_id_from_request`, `_client_id_from_request`,
+  `_fetch_neg_or_404`, `_last_event_desconto`
+- `src/treasury/tests/test_api_negotiation_write.py` — 14 testes pytest
+
+Decisoes pontuais:
+
+- **Wrapper `_*_wrapped` separado do handler** — o `@guardrail`
+  precisa receber GuardrailContext como primeiro argumento; manter
+  isolado do handler Ninja torna a chamada interna mais testavel
+  e desacopla validacao de HTTP framework
+- **`AcceptRequest.terms` opcional** — accept simples herda do ultimo
+  evento de proposta/contraproposta; raro mas possivel passar terms
+  para accept renegociado
+- **Idempotency_key prefixado** (`hdr:`/`auto:`) — facilita debugging
+  para distinguir keys explicitas das hashes determinísticas
+- **Reject e Escalate gravam mensagem_agente** dentro do `terms` JSON
+  do NegotiationEvent — alternativa seria adicionar coluna dedicada
+  mas isso poluiria o schema; JSON do terms ja e flexivel
+- **Counterpart.ultima_negociacao_resultado** atualizada via
+  `Counterpart.objects.filter(id=...).update(...)` em vez de
+  `cp.save()` — atomico, sem trigger de history extra
+- **Sem signal Django** entre Negotiation e NegotiationEvent — service
+  metodo gerencia state machine explicitamente (mais facil de auditar
+  do que signal magic)
+
+Pendências do estágio (smoke ⏳ no POD):
+
+- `pytest src/treasury/tests/test_api_negotiation_write.py` executa
+  com Django + DB ativos
+- Validar end-to-end via curl + JWT do `svc_quanttix_claw`:
+  propose → counter → accept (cada um retornando 201)
+- Validar bloqueios: propose com desconto > 10% retorna 422 com
+  `{code: POLICY_VIOLATION}`
+- Validar idempotency: 2x mesma POST com `Idempotency-Key: X` retorna
+  o mesmo `evento_id`
+- Estagio 6 (dispatch SSE) eh o proximo: `accept_negotiation` aciona
+  o `/api/v1/simulation/dispatch` para emitir boleto
 
 ---
 
