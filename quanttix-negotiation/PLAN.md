@@ -24,70 +24,112 @@
 
 ## Estágio 1: Política de Negociação (Playbook)
 
-**Repo**: `quanttix_claw`
+**Repo**: `quanttix_backend`
 **Bloqueia**: Estágios 2, 3, 4, 5
 **Depende de**: nada
 **Status**: NÃO INICIADO
 
 ### Objetivo
-Codificar em YAML as regras de engajamento (faixas de desconto, parcelamento,
-prazo, thresholds de escalação, bloqueios) que o agente consulta antes de
-propor termos. A política é dado; a engine de lookup é código Python.
+Codificar em YAML as regras de engajamento (faixas de desconto, prazo,
+thresholds de escalação, bloqueios) que o agente consulta antes de propor
+termos. A política é dado; a engine de lookup é código Python. Hospedada
+no backend para que, em versões futuras, possa evoluir para um painel de
+gestão (CRUD da policy, versionamento, override por caso, aprovação
+humana de alçada) sem mudar a fonte de verdade.
 
 ### Entregáveis
-- `extensions/quanttix-negotiation/policy/policy.example.yaml`
-- `extensions/quanttix-negotiation/policy/policy_schema.py` (Pydantic v2)
-- `extensions/quanttix-negotiation/policy/policy_engine.py` (lookup)
-- `extensions/quanttix-negotiation/policy/README.md` (como editar)
-- `extensions/quanttix-negotiation/policy/tests/test_policy_schema.py`
-- `extensions/quanttix-negotiation/policy/tests/test_policy_engine.py`
+- `src/treasury/services/negotiation_policy/__init__.py`
+- `src/treasury/services/negotiation_policy/policy_schema.py` (Pydantic v2)
+- `src/treasury/services/negotiation_policy/policy_engine.py` (load + lookup)
+- `src/treasury/services/negotiation_policy/README.md` (como editar)
+- `src/treasury/config/negotiation_policy.yaml` (cópia operacional)
+- `tests/treasury/test_negotiation_policy_schema.py`
+- `tests/treasury/test_negotiation_policy_engine.py`
+
+A versão **editorial** do YAML continua em
+`quanttix_claw/quanttix-negotiation/policy.draft.yaml` (humanos editam
+e revisam aqui). Quando alinhada, é promovida para a cópia operacional
+no backend.
 
 ### Subtarefas
-- [ ] Decidir granularidade da policy: dimensões = `(tipo_titulo, tier_contraparte, faixa_valor)`
-- [ ] Schema Pydantic v2: campos `tipo_titulo (AR|AP)`, `tier (vip|padrao|risco)`,
-      `valor_min/max`, `max_desconto_pct`, `max_parcelas`, `max_prazo_dias_extra`,
-      `juros_mensal_min_pct`, `escalation_threshold_pct`, `bloqueio_score_min`,
-      `bloqueio_em_protesto`
-- [ ] Template YAML com 4 cenários: `AR-vip`, `AR-padrao`, `AP-fornecedor-estrategico`,
-      `AP-fornecedor-eventual`
-- [ ] Função `load_policy(path: Path) -> Policy` (valida no carregamento)
-- [ ] Função `lookup(policy, title_meta, counterpart_meta) -> PolicyDecision`
-      retornando dataclass com `allowed`, `max_desconto_pct`, `escalation_required`,
-      `bloqueio_motivo` (None se OK)
-- [ ] Hierarquia de match: regra mais específica vence (tier_vip > tier_padrao)
-- [ ] Teste: policy válida carrega
+- [ ] Schema Pydantic v2 (`policy_schema.py`):
+  - `PolicyRule` com: `id`, `descricao`, `tipo_titulo (AR|AP)`,
+    `tier (str|None)`, `valor_min`, `valor_max (None=infinito)`,
+    `max_desconto_pct`, `max_parcelas`, `max_prazo_dias_extra`,
+    `juros_mensal_min_pct`, `escalation_threshold_pct`,
+    `bloqueio_score_min`, `bloqueio_em_protesto`
+  - `PolicyDefaults` com `expiracao_proposta_horas`,
+    `max_propostas_por_dia_por_contraparte`,
+    `max_negociacoes_simultaneas_global`, `rodada_maxima`
+  - `Policy` (root) com `version`, `tenant_id (None)`, `rules`, `defaults`
+  - Validators: `0 <= max_desconto_pct <= 100`,
+    `escalation_threshold_pct <= max_desconto_pct`, rule ids únicos
+- [ ] Engine (`policy_engine.py`):
+  - `load_policy(path: Path) -> Policy` (yaml.safe_load + Pydantic parse)
+  - Método `Policy.lookup(title_meta, counterpart_meta) -> PolicyDecision`
+  - Hierarquia de match: regra com tier específico vence regra sem tier;
+    regra com `valor_max` finito vence regra sem teto (dentro da faixa);
+    desempate por ordem de declaração no YAML
+- [ ] Promover YAML operacional para `src/treasury/config/negotiation_policy.yaml`
+      com os 4 cenários (AR-vip 5%, AR-padrao 10%, AP-estrategico 5%, AP-padrao 10%)
+- [ ] Teste: policy válida carrega sem erro
 - [ ] Teste: policy inválida (`max_desconto > 100`) falha com mensagem legível
-- [ ] Teste: lookup escolhe `AR-vip` quando `counterpart.tier=vip`
-- [ ] Teste: `bloqueio_em_protesto=True` retorna `PolicyDecision(allowed=False)`
-- [ ] Teste: valor fora da faixa cai pra regra mais ampla
-- [ ] Documentar formato em `policy/README.md` com 2 exemplos editáveis
+- [ ] Teste: `lookup` escolhe `AR-vip` quando `counterpart.tier=vip`
+- [ ] Teste: `lookup` cai em `AR-padrao` quando `counterpart.tier=padrao`
+- [ ] Teste: `lookup` escolhe `AP-estrategico` quando `tier=estrategico`
+- [ ] Teste: `bloqueio_em_protesto=True` (AR-vip ou AR-padrao) retorna
+      `PolicyDecision(allowed=False)`
+- [ ] Teste: `policy.defaults.rodada_maxima` acessível e tipado
+- [ ] Documentar formato em `negotiation_policy/README.md` com exemplos
 
 ### Contrato — PolicyDecision
+
 ```python
-@dataclass
+@dataclass(frozen=True)
 class PolicyDecision:
     allowed: bool
-    max_desconto_pct: Decimal | None      # None se não aplicável
+    max_desconto_pct: Decimal | None       # None se allowed=False
     max_parcelas: int | None
     max_prazo_dias_extra: int | None
     juros_mensal_min_pct: Decimal | None
-    escalation_required: bool              # True se proposta requer humano
-    bloqueio_motivo: str | None            # preenchido se allowed=False
-    matched_rule_id: str                   # id da regra que casou (audit)
+    escalation_threshold_pct: Decimal | None  # acima disso, escalar
+    bloqueio_motivo: str | None             # preenchido se allowed=False
+    matched_rule_id: str                    # id da regra (audit)
 ```
 
+O caller usa o decision assim:
+
+```python
+policy = load_policy(path)
+decision = policy.lookup(title_meta, counterpart_meta)
+
+if not decision.allowed:
+    return reject(decision.bloqueio_motivo)
+if proposed_desconto > decision.max_desconto_pct:
+    return error("POLICY_VIOLATION")
+if proposed_desconto > decision.escalation_threshold_pct:
+    return escalate_to_human(...)
+return proceed(...)
+```
+
+Os defaults globais (não dependem do lookup) são acessados via
+`policy.defaults.expiracao_proposta_horas`, `policy.defaults.rodada_maxima`, etc.
+
 ### Critério de aceite
-- `pytest extensions/quanttix-negotiation/policy/tests/` passa todos os testes
-- Pelo menos 1 cenário AR e 1 AP completos e exemplificados no YAML
-- Edição manual quebrada acusa erro legível (não stack trace cru)
-- `lookup` é determinística: mesma entrada → mesma `matched_rule_id`
+- `pytest tests/treasury/test_negotiation_policy_*` passa
+- 4 cenários AR/AP com tiers exemplificados no YAML operacional
+- Edição manual quebrada acusa erro Pydantic legível (não stack trace cru)
+- `lookup` é determinístico: mesma entrada → mesma `matched_rule_id`
 
 ### Notas de implementação
-- Pydantic v2 (já usado no `quanttix_backend`)
+- Pydantic v2 (já usado no backend)
 - Não codar regras no Python — apenas a engine. YAML é a fonte
-- Deixar `tenant_id` como campo opcional na regra (preparar multi-tenant)
-- `escalation_threshold_pct < max_desconto_pct` é regra: acima do threshold
-  precisa de humano, mas abaixo do máximo o agente pode autorizar
+- `tenant_id=None` por enquanto; preparação pra multi-tenant
+- `escalation_threshold_pct <= max_desconto_pct` é invariante validado
+- O módulo `negotiation_policy/` é candidato natural a painel admin
+  futuro (CRUD, versionamento, alçada). A separação engine/dado já facilita
+- O endpoint REST `GET /api/v1/tesouraria/negotiation/policy` do Estágio 3
+  é apenas uma thin facade sobre esta engine
 
 ---
 
@@ -162,12 +204,12 @@ no router existente do backend. Tanto `quanttix_ai` quanto `quanttix_claw`
 consomem via HTTPS + JWT (mesmo padrão já usado em
 `quanttix_api_client.py`). Sem efeitos colaterais — apenas leitura.
 
-### Por que REST (e não MCP)
+### Por que REST
 Topologia atual: backend roda em private network (VPC), `quanttix_ai` e
 `quanttix_claw` rodam juntos no Server X (POD com GPUs). A comunicação
-cross-zone já passa por HTTPS + JWT service account. Adicionar MCP
-acrescenta protocolo sem ganho de segurança e duplica a stack. Mantemos
-REST (Django Ninja, mesmo padrão dos endpoints `treasury/api_*`).
+cross-zone já passa por HTTPS + JWT service account — duplicar isso com
+outro protocolo não traz ganho de segurança. Seguimos REST (Django Ninja,
+mesmo padrão dos endpoints `treasury/api_*`).
 
 ### Entregáveis
 - `src/treasury/api_negotiation.py` (router Ninja, rotas read)
@@ -667,7 +709,7 @@ ao encerrar, sai.
      → handoff via HTTP localhost → `quanttix_claw` (conduz a negociação).
    - Detalhe do handoff: Estágio 7.
 
-2. **Transporte — REST + JWT (MCP descartado).**
+2. **Transporte — REST + JWT.**
    - Decisão baseada na topologia: backend roda em private network,
      `quanttix_ai` e `quanttix_claw` rodam no mesmo Server X.
    - Tools de leitura e escrita do agente são endpoints REST no router
@@ -675,10 +717,8 @@ ao encerrar, sai.
      `api_*` do treasury), autenticados por JWT service account.
    - Handoff AI → Claw é **HTTP POST localhost** (Estágio 7), sem
      intermediário, sem broker. Latência mínima, debug trivial.
-   - MCP foi avaliado e descartado: acrescenta protocolo sem ganho de
-     segurança (a barreira é a mesma: JWT + TLS pro backend, localhost
-     pro handoff). Pode ser reavaliado em v2 se uma terceira LLM externa
-     entrar na pilha.
+   - A barreira de segurança é JWT + TLS pro backend (cross-zone) e
+     bearer token loopback pro handoff (mesmo servidor).
 
 3. **Policy YAML — global, com `tenant_id` reservado.**
    - Draft inicial criado em `policy.draft.yaml` (nesta pasta):
@@ -729,7 +769,6 @@ Branch: `developer_flow` (untracked). **Commitar antes de iniciar Estágio 6.**
 - **AP**: Accounts Payable (contas a pagar, títulos de fornecedor)
 - **CNAB**: padrão Febraban de troca de arquivos com bancos
 - **DDA**: Débito Direto Autorizado
-- **MCP**: Model Context Protocol (Anthropic)
 - **Borderô**: lote de boletos enviado ao banco para registro
 - **Tier**: classificação do contraparte (vip/padrão/risco)
 - **Tenant**: empresa cliente do SaaS Quanttix

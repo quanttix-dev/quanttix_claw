@@ -2,7 +2,7 @@
 
 Plano de implementação do agente conversacional autônomo de negociação que
 roda dentro do `quanttix_claw` (fork OpenClaw), integrado com
-`quanttix_backend` (MCP + dispatch + guardrails) e o pipeline de simulação
+`quanttix_backend` (REST tools + dispatch + guardrails) e o pipeline de simulação
 CNAB em `quanttix_data_eng`.
 
 ## Arquivos nesta pasta
@@ -64,7 +64,7 @@ Bots Telegram (dois, funcoes distintas):
 | Repo | Branch | O que muda |
 |---|---|---|
 | `quanttix_claw` | `developer` | Extension `quanttix-negotiation`, skill, policy, allowlist hooks |
-| `quanttix_backend` | `agentic_flow_cnab` | MCP server, dispatch endpoint, guardrails, audit trail |
+| `quanttix_backend` | `agentic_flow_cnab` | REST negotiation endpoints, policy engine, dispatch, guardrails, audit |
 | `quanttix_ai` | `developer_cpp` | `NegotiationOrchestrator` vira fallback (não é mais primário) |
 | `quanttix_data_eng` | `developer_flow` | Já contém DAGs `sim_*` — sem mudanças nesta fase |
 
@@ -86,7 +86,7 @@ Se a sessão atual for interrompida (créditos, troca de conta, novo dia):
 - Estágio 1 (Policy) bloqueia 2, 3, 4, 5. Não tente codar a skill antes da policy estar pronta.
 - Estágio 6 (Dispatch endpoint) bloqueia o fechamento real do ciclo de boleto.
 - Se uma subtarefa estiver mal definida, prefira atualizar o PLAN.md primeiro (com nota explicando) antes de codar.
-- Mudanças de contrato (assinatura de tool MCP, payload do dispatch) precisam atualizar a seção "Contratos" do estágio antes de implementar.
+- Mudanças de contrato (assinatura de endpoint REST, payload do dispatch) precisam atualizar a seção "Contratos" do estágio antes de implementar.
 
 ## Convenções de status
 
@@ -98,12 +98,11 @@ No PLAN.md cada estágio tem um campo **Status** com três valores:
 
 ## Pré-requisitos antes de começar a codar
 
-- [ ] Os 3 repos commitados (estado atual tem mudanças não commitadas — ver
-      conversa anterior). Confirmar com o usuário antes de iniciar Estágio 1.
-- [ ] Definir se Telegram bot do agente é o **mesmo** ou **diferente** do
-      bot do `quanttix_ai`. Decisão de arquitetura, não código.
-- [ ] Confirmar onde o MCP server vai rodar (processo separado vs embarcado
-      no FastAPI do backend). Recomendação: embarcado, rota `/mcp` no backend.
+- [x] Os 4 repos commitados e empurrados (2026-05-10).
+- [x] Bots Telegram: dois separados (`@Quanttix_bot` interno do
+      `quanttix_ai`, `@Quanttix_Negotiator_bot` externo do `quanttix_claw`).
+- [x] Transporte de tools: REST + JWT no backend, HTTP localhost no
+      handoff AI ↔ Claw (chamada direta, sem broker).
 
 ---
 

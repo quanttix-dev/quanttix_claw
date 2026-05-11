@@ -1,54 +1,92 @@
 # policy.draft.yaml
-# Politica de negociacao - DRAFT inicial v0.1
-# Criado: 2026-05-10
+# Politica de negociacao - DRAFT inicial v0.2
+# Atualizado: 2026-05-10
 #
-# Seed acordado para a v0 do agente:
-#   - Desconto maximo: 10% (AR e AP)
-#   - Sem parcelamento (max_parcelas = 1)
-#   - Escalacao humana acima de 7% de desconto
+# 4 cenarios (tiers) com 2 niveis de margem por tipo_titulo:
+#   - AR-vip       : cliente VIP        | max desconto 5%
+#   - AR-padrao    : cliente padrao     | max desconto 10%
+#   - AP-estrategico: fornecedor estrategico | max desconto 5%
+#   - AP-padrao    : fornecedor padrao  | max desconto 10%
 #
-# Quando o Estagio 1 do PLAN.md for implementado, a engine de validacao
-# carrega este YAML, valida com Pydantic v2, e expoe via tool MCP
-# get_negotiation_policy(). O schema pode evoluir; os valores aqui sao
-# a baseline que o agente respeita ate decisao em contrario.
+# Sem parcelamento nesta versao (max_parcelas=1). Escalation em 70% do
+# max_desconto (3.5% e 7% respectivamente).
+#
+# Versao editorial (humana). A copia operacional sera promovida ao
+# backend em src/treasury/config/negotiation_policy.yaml quando o
+# Estagio 1 for implementado, e carregada pelo endpoint REST
+# GET /api/v1/tesouraria/negotiation/policy.
 
-version: "0.1-draft"
+version: "0.2-draft"
 tenant_id: null  # null = global; reservado para multi-tenant
 
 rules:
   # ====================================================================
-  # Accounts Receivable - cobranca de cliente
+  # AR - cobranca de cliente VIP (conservador, prioriza relacionamento)
   # ====================================================================
-  - id: "AR-default"
-    descricao: "Regra padrao para titulos a receber"
+  - id: "AR-vip"
+    descricao: "Cliente VIP - margem reduzida, foco em relacionamento"
     tipo_titulo: "AR"
-    tier: null              # qualquer tier
-    valor_min: 0.00
-    valor_max: null         # sem teto
-    max_desconto_pct: 10.0
-    max_parcelas: 1         # sem parcelamento nesta versao
-    max_prazo_dias_extra: 30
-    juros_mensal_min_pct: 0.0
-    escalation_threshold_pct: 7.0   # acima disso pede aprovacao humana
-    bloqueio_score_min: 300         # cliente com score < 300 nao negocia
-    bloqueio_em_protesto: true      # cliente em protesto nao negocia
-
-  # ====================================================================
-  # Accounts Payable - negociacao com fornecedor
-  # ====================================================================
-  - id: "AP-default"
-    descricao: "Regra padrao para titulos a pagar"
-    tipo_titulo: "AP"
-    tier: null
+    tier: "vip"
     valor_min: 0.00
     valor_max: null
-    max_desconto_pct: 10.0      # desconto que pedimos ao fornecedor
+    max_desconto_pct: 5.0
     max_parcelas: 1
-    max_prazo_dias_extra: 30    # extensao de prazo que podemos pedir
+    max_prazo_dias_extra: 30
+    juros_mensal_min_pct: 0.0
+    escalation_threshold_pct: 3.5   # 70% de 5%
+    bloqueio_score_min: 0           # cliente VIP nao bloqueia por score
+    bloqueio_em_protesto: true
+
+  # ====================================================================
+  # AR - cobranca de cliente padrao (maior margem)
+  # ====================================================================
+  - id: "AR-padrao"
+    descricao: "Cliente padrao - margem ampla"
+    tipo_titulo: "AR"
+    tier: "padrao"
+    valor_min: 0.00
+    valor_max: null
+    max_desconto_pct: 10.0
+    max_parcelas: 1
+    max_prazo_dias_extra: 30
+    juros_mensal_min_pct: 0.0
+    escalation_threshold_pct: 7.0   # 70% de 10%
+    bloqueio_score_min: 300
+    bloqueio_em_protesto: true
+
+  # ====================================================================
+  # AP - fornecedor estrategico (conservador, prioriza relacionamento)
+  # ====================================================================
+  - id: "AP-estrategico"
+    descricao: "Fornecedor estrategico - pedido moderado, sem agressividade"
+    tipo_titulo: "AP"
+    tier: "estrategico"
+    valor_min: 0.00
+    valor_max: null
+    max_desconto_pct: 5.0           # desconto que pedimos ao fornecedor
+    max_parcelas: 1
+    max_prazo_dias_extra: 15        # extensao moderada
+    juros_mensal_min_pct: 0.0
+    escalation_threshold_pct: 3.5
+    bloqueio_score_min: 0
+    bloqueio_em_protesto: false
+
+  # ====================================================================
+  # AP - fornecedor padrao (margem ampla)
+  # ====================================================================
+  - id: "AP-padrao"
+    descricao: "Fornecedor padrao - margem ampla"
+    tipo_titulo: "AP"
+    tier: "padrao"
+    valor_min: 0.00
+    valor_max: null
+    max_desconto_pct: 10.0
+    max_parcelas: 1
+    max_prazo_dias_extra: 30
     juros_mensal_min_pct: 0.0
     escalation_threshold_pct: 7.0
-    bloqueio_score_min: 0       # AP nao bloqueia por score (nos pagamos)
-    bloqueio_em_protesto: false # AP nao bloqueia por protesto
+    bloqueio_score_min: 0
+    bloqueio_em_protesto: false
 
 defaults:
   expiracao_proposta_horas: 48
