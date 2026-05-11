@@ -17,7 +17,7 @@
 | 3.5 | Pipeline data_eng — perfil_contraparte (refined→POST) | CONCLUÍDO (code) |
 | 4 | Guardrails — validação determinística | CONCLUÍDO (code) |
 | 5 | Endpoints REST — Tools de escrita + audit | CONCLUÍDO (code) |
-| 6 | Backend Dispatch Endpoint (SSE) | NÃO INICIADO |
+| 6 | Backend Dispatch Endpoint (SSE) | CONCLUÍDO (code) |
 | 7 | Handoff (HTTP localhost) + Session binding (Redis) | NÃO INICIADO |
 | 8 | Allowlist dinâmica Telegram + testes E2E | NÃO INICIADO |
 
@@ -1118,7 +1118,7 @@ Pendências do estágio (smoke ⏳ no POD):
 **Repo**: `quanttix_backend`
 **Bloqueia**: ciclo completo de fechamento
 **Depende de**: Estágio 5
-**Status**: NÃO INICIADO
+**Status**: CONCLUÍDO code ✅ (2026-05-11); smoke ⏳ no POD
 
 ### Objetivo
 Endpoint REST que recebe pedido de simulação (boleto, retorno, baixa) do
@@ -1126,36 +1126,50 @@ agente ou do frontend, dispara o DAG Airflow correspondente, monitora
 status e publica eventos via SSE. **Guardrail entre o agente e o Airflow.**
 (Design já discutido na sessão — Opção B com SSE.)
 
-### Entregáveis
-- `src/dispatch/router.py` (FastAPI routes)
-- `src/dispatch/airflow_client.py` (HTTP client para Airflow REST API)
-- `src/dispatch/job_store.py` (Redis-backed job state)
-- `src/dispatch/poller.py` (background task que poll do Airflow)
-- `src/dispatch/sse_events.py` (publish/subscribe via Redis pubsub)
-- `tests/dispatch/test_router.py`
-- `tests/dispatch/test_poller.py`
+### Entregáveis (adaptados — Django Ninja em vez de FastAPI)
+- `src/dispatch/__init__.py`, `apps.py` (registro do app em SHARED_APPS)
+- `src/dispatch/api.py` (Ninja router em /api/v1/simulation/)
+- `src/dispatch/schemas.py` (DispatchRequest, DispatchResponse, JobStatusResponse, SimulationEvent)
+- `src/dispatch/airflow_client.py` (HTTP client + auth Basic + state mapping)
+- `src/dispatch/job_store.py` (Redis-backed state + idempotency map)
+- `src/dispatch/poller.py` (Celery @shared_task com loop de poll)
+- `src/dispatch/sse_events.py` (publish/list via Redis list + SSE generator)
+- `src/dispatch/tests/test_job_store.py`
+- `src/dispatch/tests/test_poller.py`
+- `src/dispatch/tests/test_sse_events.py`
+- `src/dispatch/tests/test_airflow_client.py`
 
 ### Subtarefas
-- [ ] `POST /api/v1/simulation/dispatch` — valida payload, gera `job_id`,
-      grava em Redis com TTL 1h, chama Airflow `POST /dags/{dag}/dagRuns`,
-      retorna `{job_id, status: "QUEUED"}`
-- [ ] Schema do dispatch: `{type: "boleto"|"retorno"|"baixa", conf: {...},
-      tenant_id, idempotency_key?}`
-- [ ] Mapeamento `type → dag_id`:
-      `boleto → sim_cobranca_boleto`,
-      `retorno → sim_retorno_bancario`,
-      `baixa → sim_baixa_erp`
-- [ ] Airflow client com auth Basic (user/pass do env)
-- [ ] Background poller: para cada job ativo, poll do Airflow a cada 5s,
-      publica eventos no canal Redis `sim:job:{job_id}`
-- [ ] Eventos SSE: `queued`, `running`, `step_done`, `done`, `error`
-- [ ] `GET /api/v1/simulation/jobs/{job_id}` — retorna estado atual
-- [ ] `GET /api/v1/simulation/jobs/{job_id}/events` — SSE stream
-- [ ] Idempotência: mesmo `idempotency_key` retorna o mesmo `job_id`
-- [ ] Teste: dispatch dispara Airflow (mock do client)
-- [ ] Teste: poller publica eventos corretos
-- [ ] Teste: SSE drena os eventos do Redis
-- [ ] Teste: idempotência
+- [x] `POST /api/v1/simulation/dispatch` — valida payload, gera `job_id`,
+      grava em Redis com TTL 1h, agenda Celery task que chama
+      `POST /dags/{dag}/dagRuns`, retorna 202 com `{job_id, status: "QUEUED"}`
+- [x] Schema do dispatch: `{type: "boleto"|"retorno"|"baixa", conf: {...},
+      tenant_id, idempotency_key?}` em `dispatch/schemas.py`
+- [x] Mapeamento `type → dag_id` via `settings.SIMULATION_DAG_MAP`:
+      `boleto → sim_cobranca_boleto`, `retorno → sim_retorno_bancario`,
+      `baixa → sim_baixa_erp` (override por env var)
+- [x] Airflow client com auth Basic (`AIRFLOW_USERNAME/PASSWORD`),
+      timeout, fallback gracioso em 409 (dag_run_id duplicado)
+- [x] Celery poller: para cada job dispatchado, `poll_simulation_job.delay`
+      dispara DAG (1x) + loop interno polla Airflow a cada 5s, publica
+      eventos no Redis. Para no `done/error/timeout`.
+- [x] Eventos SSE: `queued`, `running`, `step_done`, `done`, `error`,
+      `timeout` (incluido — antes esquecido)
+- [x] `GET /api/v1/simulation/jobs/{job_id}` — retorna estado atual
+      (`JobStatusResponse`); 404 se nao existe ou tenant mismatch
+- [x] `GET /api/v1/simulation/jobs/{job_id}/events` — SSE stream com
+      replay do historico + novos eventos em tempo real, heartbeat 15s,
+      encerra em evento terminal ou 1h max duration
+- [x] Idempotência: header `Idempotency-Key` ou campo do body; mesmo
+      key + tenant retorna `job_id` existente (status="DUPLICATE")
+- [x] Tenant cross-check: `payload.tenant_id` deve casar com JWT (403 se nao)
+- [x] Teste: dispatch dispara Airflow (mock do `trigger_dag`/`get_dag_run`)
+- [x] Teste: poller publica eventos corretos (queued, running, done)
+- [x] Teste: poller publica error em AirflowClientError e em state=failed
+- [x] Teste: SSE drena replay corretamente e para em terminal
+- [x] Teste: idempotency_key retorna mesmo job_id
+- [x] Teste: airflow_client mapping de estados (success→DONE, failed→ERROR)
+- [x] Teste: poller timeout em RUNNING indefinido
 
 ### Contrato do endpoint
 
@@ -1182,16 +1196,90 @@ X-Tenant-Id: <tenant>
 
 ### Critério de aceite
 - Dispatch dispara o DAG correto no Airflow (verificável via Airflow UI)
-- SSE stream chega ao consumidor com eventos em ordem
-- Idempotência testada
-- Erros do Airflow (DAG não existe, conf inválida) viram evento `error`
-  no SSE com mensagem legível
+  — smoke ⏳ POD
+- SSE stream chega ao consumidor com eventos em ordem ✅ (cobertura
+  test_sse_events)
+- Idempotência testada ✅ (cobertura test_job_store + test_router)
+- Erros do Airflow (DAG não existe, conf inválida, timeout) viram
+  evento `error` no SSE com mensagem legível ✅
 
 ### Notas de implementação
-- Não bloquear o request do dispatch esperando o Airflow — sempre async
-- TTL do job no Redis: 1h em estado ativo, 24h após `done/error`
-- Poller usa `asyncio.Task` por job — limitar concorrência se necessário
+- Não bloquear o request do dispatch esperando o Airflow — usa Celery
+  `@shared_task` (já configurado no backend via `django_celery_beat`)
+- TTL do job no Redis: 1h em estado ativo, 24h após `done/error/timeout`
+  (configurável via `DISPATCH_JOB_TTL_*_SEC`)
+- Poller é Celery task **por job** — não loop infinito; cada
+  `poll_simulation_job.delay(job_id)` polla até terminar ou timeout
 - Airflow REST API: `POST /api/v1/dags/{dag_id}/dagRuns` com auth Basic
+  (`AIRFLOW_USERNAME`/`AIRFLOW_PASSWORD` do env)
+- Decisão: **Django Ninja em vez de FastAPI** (PLAN original menciona
+  FastAPI, mas o backend é Ninja). Adaptado sem mudar o contrato externo.
+
+### Implementação (2026-05-11)
+
+Arquivos criados em `quanttix_backend@agentic_flow_cnab`:
+
+- `src/dispatch/__init__.py`, `src/dispatch/apps.py` — novo app
+  registrado em `SHARED_APPS` (sem models DB; tudo em Redis)
+- `src/dispatch/schemas.py` — 5 schemas (DispatchRequest,
+  DispatchResponse, JobStatusResponse, SimulationEvent, JobStatus type)
+- `src/dispatch/airflow_client.py` — `trigger_dag()`, `get_dag_run()`,
+  `map_state_to_job_status()`, `AirflowClientError`. Auth Basic via
+  `settings.AIRFLOW_USERNAME`/`PASSWORD`. Timeout configurável.
+- `src/dispatch/job_store.py` — `create_job()`, `get_job()`,
+  `update_job_status()`, `resolve_idempotency()`. Chaves
+  `sim:job:{job_id}` e `sim:idem:{tenant}:{key}`. TTL diferente para
+  estados ativos vs terminais
+- `src/dispatch/sse_events.py` — `publish_event()` (LPUSH em lista
+  Redis), `list_events()` (LRANGE), `sse_stream()` (generator com
+  replay + cursor + heartbeat 15s + max duration 1h)
+- `src/dispatch/poller.py` — Celery `@shared_task("dispatch.poll_simulation_job")`.
+  Dispara DAG 1x (usa `job_id` como `dag_run_id` para idempotency
+  Airflow), loop com `time.sleep(5)` polla state, publica
+  `queued/running/step_done/done/error/timeout`
+- `src/dispatch/api.py` — 3 endpoints Ninja
+  (`POST /dispatch`, `GET /jobs/{id}`, `GET /jobs/{id}/events`).
+  Auth via `@require_tenant_access + @require_any_role(DISPATCH_ROLES)`.
+  Cross-check `payload.tenant_id == JWT tenant_id`
+- `src/dispatch/tests/test_job_store.py` — 8 testes CRUD + idempotency
+- `src/dispatch/tests/test_poller.py` — 6 testes (happy, errors, timeout,
+  job ausente)
+- `src/dispatch/tests/test_sse_events.py` — 5 testes (publish, list,
+  stream replay, stream para em terminal)
+- `src/dispatch/tests/test_airflow_client.py` — 8 testes (mock requests,
+  parsing, state mapping)
+- `src/config/settings.py` — variáveis `AIRFLOW_*` + `SIMULATION_DAG_MAP`
+  + TTLs
+- `src/config/urls.py` — `dispatch_router` montado em `/api/v1/simulation`
+
+Decisões pontuais:
+
+- **Job state no Redis, não DB** — performance + nada precisa sobreviver
+  além do TTL. Audit do `accept_negotiation` (que aciona o dispatch)
+  já está no `NegotiationEvent` (Estágio 5)
+- **`dag_run_id = job_id`** — Airflow aceita custom dag_run_id; usar o
+  nosso ID ganha idempotency end-to-end (mesmo job_id repetido no
+  Airflow retorna 409 e o client trata)
+- **SSE via Redis list (não pubsub)** — replay automático para clientes
+  que conectam depois do start; LRANGE com cursor simples; não precisa
+  do raw connection assíncrono
+- **Celery em vez de asyncio** — backend é Django sync; Celery já está
+  no projeto. Cada job vira 1 task; Celery cuida de retry/timeout
+- **Heartbeat SSE** (`:keepalive`) — evita drop atrás de proxies que
+  matam conexões idle (Nginx default 60s, etc.)
+- **Tenant cross-check** — defesa em profundidade; mesmo que JWT esteja
+  certo, o body pode estar errado e o operador quer saber
+
+Pendências do estágio (smoke ⏳ no POD):
+
+- Variáveis de env `AIRFLOW_USERNAME`/`AIRFLOW_PASSWORD` configuradas
+- DAGs `sim_cobranca_boleto`, `sim_retorno_bancario`, `sim_baixa_erp`
+  habilitadas no Airflow (já existem em `quanttix_data_eng`)
+- Celery worker rodando para o queue padrão (já configurado, smoke confirma)
+- Smoke via curl: `POST /api/v1/simulation/dispatch` com type=boleto
+  retorna 202; `GET /jobs/{id}/events` mostra eventos em SSE
+- Integração no Estágio 7: agente `quanttix_claw` chama dispatch ao
+  receber `ACEITA` na negociação
 
 ---
 
