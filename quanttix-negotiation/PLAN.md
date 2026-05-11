@@ -12,7 +12,7 @@
 | # | Estágio | Status |
 |---|---|---|
 | 1 | Política de Negociação (Playbook) | CONCLUÍDO |
-| 2 | Skill / Persona do Agente | NÃO INICIADO |
+| 2 | Skill / Persona do Agente | CONCLUÍDO |
 | 3 | Endpoints REST — Tools de leitura | NÃO INICIADO |
 | 4 | Guardrails — validação determinística | NÃO INICIADO |
 | 5 | Endpoints REST — Tools de escrita + audit | NÃO INICIADO |
@@ -152,7 +152,7 @@ Os defaults globais (não dependem do lookup) são acessados via
 **Repo**: `quanttix_claw`
 **Bloqueia**: Estágios 3 (parcial), 8
 **Depende de**: Estágio 1
-**Status**: NÃO INICIADO
+**Status**: CONCLUÍDO (2026-05-10)
 
 ### Objetivo
 Definir o comportamento conversacional do agente: tom, estrutura da conversa,
@@ -169,30 +169,74 @@ system prompt; o policy.yaml entra como contexto dinâmico via tool.
 - `skills/quanttix-negotiation/examples/example_ap_counterproposal.md`
 
 ### Subtarefas
-- [ ] Definir tom: formal-cordial AR, profissional-direto AP
-- [ ] Estrutura da conversa: `saudação → contexto → proposta → contra → fecho`
-- [ ] Regras de compliance verbal: não prometer o que não pode cumprir,
+- [x] Definir tom: formal-cordial AR, profissional-direto AP
+- [x] Estrutura da conversa: `saudação → contexto → proposta → contra → fecho`
+- [x] Regras de compliance verbal: não prometer o que não pode cumprir,
       sempre confirmar valores por escrito antes de fechar
-- [ ] Frases de escalação: "preciso confirmar internamente"
+- [x] Frases de escalação: "preciso confirmar internamente"
       (quando `escalation_required=True`)
-- [ ] Frases de bloqueio: como recusar com elegância sem revelar razões internas
-- [ ] Escrever SKILL.md principal (system prompt, ~600-1000 palavras)
-- [ ] manifest.json com `name`, `description`, `tools_required[]`,
-      `model_target=planner` (Gemma 4 E2B via quanttix-planner @ 8091)
-- [ ] Greeting prompt (saudação por canal: AR vs AP)
-- [ ] Objection handling: 5 objeções comuns + scripts de resposta
-- [ ] Escalation prompt: como avisar o cliente e o supervisor
-- [ ] Exemplo AR-aceitação completo (turn-by-turn)
-- [ ] Exemplo AP-contraproposta completo (turn-by-turn)
-- [ ] Revisar com `policy.example.yaml` em mãos — os números batem?
+- [x] Frases de bloqueio: como recusar com elegância sem revelar razões internas
+- [x] Escrever SKILL.md principal (system prompt, ~600-1000 palavras)
+- [x] ~~manifest.json com `name`, `description`, `tools_required[]`,
+      `model_target=planner`~~ — **obsoleta**: skills bundled do OpenClaw
+      usam YAML frontmatter dentro do próprio SKILL.md (ver `skills/summarize`,
+      `skills/taskflow`). Metadados (`name`, `description`, `metadata.openclaw.emoji`,
+      `metadata.openclaw.model_target`, `metadata.openclaw.tools_required`)
+      ficaram no frontmatter — sem arquivo separado.
+- [x] Greeting prompt (saudação por canal: AR vs AP)
+- [x] Objection handling: 5 objeções comuns + scripts de resposta
+- [x] Escalation prompt: como avisar o cliente e o supervisor
+- [x] Exemplo AR-aceitação completo (turn-by-turn)
+- [x] Exemplo AP-contraproposta completo (turn-by-turn)
+- [x] Revisar com `policy.draft.yaml` em mãos — os números batem ✓
+      (era `policy.example.yaml` no plano original — o arquivo real é
+      `policy.draft.yaml` nesta pasta; o operacional vive em
+      `quanttix_backend/src/treasury/config/negotiation_policy.yaml`)
 
 ### Critério de aceite
-- SKILL.md lê coerente em uma passada (sem contradição interna)
+- SKILL.md lê coerente em uma passada (sem contradição interna) ✓
 - Exemplos mostram o agente usando tools de leitura/escrita
-  (mesmo que stubs nesta fase)
+  (mesmo que stubs nesta fase) ✓ (`example_ar_acceptance.md`,
+  `example_ap_counterproposal.md` cobrem todas as 9 tools nomeadas no
+  frontmatter)
 - Manifest é parseável pelo OpenClaw skill loader
-  (`openclaw skill validate` se existir)
-- Tom passa por revisão humana antes de seguir pro Estágio 3
+  (`openclaw skill validate` se existir) — **smoke ⏳** (validação real
+  só no POD, ambiente local não roda OpenClaw)
+- Tom passa por revisão humana antes de seguir pro Estágio 3 — **⏳ pendente**
+
+### Implementação (2026-05-10)
+- Arquivos criados em `quanttix_claw/skills/quanttix-negotiation/`:
+  - `SKILL.md` (~880 palavras, frontmatter com tools + model_target,
+    cobre tom, estrutura, compliance, escalação, bloqueio, tools, erro)
+  - `prompts/greeting.md` (saudações AR/AP por estado + diretrizes)
+  - `prompts/objection_handling.md` (5 objeções com scripts AR/AP)
+  - `prompts/escalation.md` (gatilhos, mensagens, payload da tool,
+    códigos de `reason` padronizados, retomada)
+  - `examples/example_ar_acceptance.md` (9 turnos, AR-padrao, accept
+    com confirmação por escrito, contra-proposta no threshold)
+  - `examples/example_ap_counterproposal.md` (9 turnos, AP-padrao,
+    escalação para humano + retomada + accept final)
+- Decisões pontuais registradas:
+  - Manifest.json não foi criado — frontmatter YAML do SKILL.md é o
+    padrão das skills bundled OpenClaw (`skills/summarize`,
+    `skills/taskflow`). Os 9 nomes de tools (`get_title`,
+    `get_counterpart`, `get_negotiation_policy`, `list_open_negotiations`,
+    `propose_negotiation`, `counterproposal_negotiation`,
+    `accept_negotiation`, `reject_negotiation`, `escalate_negotiation`)
+    estão em `metadata.openclaw.tools_required`. **Estágios 3 e 5
+    devem implementar endpoints REST com esses nomes** (mapeamento
+    1-to-1 — o cliente TS do extension expõe cada um como tool).
+  - `model_target=quanttix-planner` (não `gemma-4-e2b` cru) — segue o
+    namespace de provider definido em
+    `extensions/quanttix-planner/openclaw.plugin.json`.
+- Validações:
+  - Números dos exemplos batem com `policy.draft.yaml` (AR-padrao /
+    AP-padrao, max 10%, threshold 7%, max_parcelas=1,
+    max_prazo_dias_extra=30)
+  - Cálculos conferidos: 10.450 × 0.93 = 9.718,50; 24.000 × 0.96 = 23.040
+- Pendências do estágio:
+  - Carregamento real no OpenClaw skill loader (smoke ⏳ — só no POD)
+  - Revisão humana do tom antes do Estágio 3
 
 ### Notas de implementação
 - OpenClaw skills usam o padrão `.agents/skills/<id>/SKILL.md` para skills
