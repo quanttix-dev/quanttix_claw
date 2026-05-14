@@ -286,10 +286,6 @@ export function createGatewayConfigModuleMock(actual: GatewayConfigModule): Gate
     get isNixMode() {
       return testIsNixMode.value;
     },
-    migrateLegacyConfig: (raw: unknown) => ({
-      config: testState.migrationConfig ?? (raw as Record<string, unknown>),
-      changes: testState.migrationChanges,
-    }),
     applyConfigOverrides: (cfg: OpenClawConfig) =>
       composeTestConfig(cfg as Record<string, unknown>),
     loadConfig: loadRuntimeAwareTestConfig,

@@ -114,6 +114,7 @@ function unwrap<T>(promise: Promise<T>): Promise<ReturnType<typeof jsonResult>> 
 function makeGetTitle(deps: ToolDeps): AnyAgentTool {
   return {
     name: "get_title",
+    label: "Get title",
     description: "Read-only lookup of a title (AR or AP) with valor atualizado e juros.",
     parameters: GetTitleSchema,
     async execute(_toolCallId: string, params: unknown) {
@@ -126,6 +127,7 @@ function makeGetTitle(deps: ToolDeps): AnyAgentTool {
 function makeGetCounterpart(deps: ToolDeps): AnyAgentTool {
   return {
     name: "get_counterpart",
+    label: "Get counterpart",
     description:
       "Read-only lookup of counterpart by document — returns tier, score, histórico, protesto.",
     parameters: GetCounterpartSchema,
@@ -139,6 +141,7 @@ function makeGetCounterpart(deps: ToolDeps): AnyAgentTool {
 function makeGetPolicy(deps: ToolDeps): AnyAgentTool {
   return {
     name: "get_negotiation_policy",
+    label: "Get negotiation policy",
     description:
       "PolicyDecision for a title+counterpart: max_desconto_pct, escalation_threshold_pct, allowed.",
     parameters: GetPolicySchema,
@@ -152,6 +155,7 @@ function makeGetPolicy(deps: ToolDeps): AnyAgentTool {
 function makeListOpenNegotiations(deps: ToolDeps): AnyAgentTool {
   return {
     name: "list_open_negotiations",
+    label: "List open negotiations",
     description: "Lista negociações abertas da mesma contraparte (evita propostas concorrentes).",
     parameters: ListOpenNegotiationsSchema,
     async execute(_toolCallId: string, params: unknown) {
@@ -164,6 +168,7 @@ function makeListOpenNegotiations(deps: ToolDeps): AnyAgentTool {
 function makePropose(deps: ToolDeps): AnyAgentTool {
   return {
     name: "propose_negotiation",
+    label: "Propose negotiation",
     description:
       "Cria a proposta inicial no backend (evento PROPOSTA). Sempre dentro de max_desconto_pct da policy. Envelopado pelo guardrail no backend.",
     parameters: ProposeSchema,
@@ -189,6 +194,7 @@ function makePropose(deps: ToolDeps): AnyAgentTool {
 function makeCounterproposal(deps: ToolDeps): AnyAgentTool {
   return {
     name: "counterproposal_negotiation",
+    label: "Register counterproposal",
     description:
       "Registra contraproposta recebida da contraparte. Limita a policy.defaults.rodada_maxima (5).",
     parameters: CounterproposalSchema,
@@ -210,6 +216,7 @@ function makeCounterproposal(deps: ToolDeps): AnyAgentTool {
 function makeAccept(deps: ToolDeps): AnyAgentTool {
   return {
     name: "accept_negotiation",
+    label: "Accept negotiation",
     description:
       "Fecha a negociação como ACEITA. Só chamar após confirmação numérica explícita do contraparte. Aciona dispatch do boleto.",
     parameters: AcceptSchema,
@@ -228,6 +235,7 @@ function makeAccept(deps: ToolDeps): AnyAgentTool {
 function makeReject(deps: ToolDeps): AnyAgentTool {
   return {
     name: "reject_negotiation",
+    label: "Reject negotiation",
     description: "Fecha a negociação como RECUSADA com motivo operacional curto.",
     parameters: RejectSchema,
     async execute(_toolCallId: string, params: unknown) {
@@ -247,6 +255,7 @@ function makeReject(deps: ToolDeps): AnyAgentTool {
 function makeEscalate(deps: ToolDeps): AnyAgentTool {
   return {
     name: "escalate_negotiation",
+    label: "Escalate negotiation",
     description:
       "Escala a negociação para revisão humana (acima do threshold, condição não prevista, etc.).",
     parameters: EscalateSchema,
