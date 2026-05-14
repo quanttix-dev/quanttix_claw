@@ -6,7 +6,7 @@ import path from "node:path";
 import { vi } from "vitest";
 import { applyPluginAutoEnable } from "../config/plugin-auto-enable.js";
 import type { AgentBinding } from "../config/types.agents.js";
-import type { OpenClawConfig } from "../config/types.js";
+import type { OpenClawConfig, ResolvedSourceConfig, RuntimeConfig } from "../config/types.js";
 import { testConfigRoot, testIsNixMode, testState } from "./test-helpers.runtime-state.js";
 
 type GatewayConfigModule = typeof import("../config/config.js");
@@ -160,13 +160,17 @@ export function createGatewayConfigModuleMock(actual: GatewayConfigModule): Gate
         exists: true,
         raw,
         parsed: testState.legacyParsed ?? {},
+        sourceConfig: {} as ResolvedSourceConfig,
+        resolved: {} as ResolvedSourceConfig,
         valid: false,
-        config: {},
+        runtimeConfig: {} as RuntimeConfig,
+        config: {} as RuntimeConfig,
         hash: hashConfigRaw(raw),
         issues: testState.legacyIssues.map((issue) => ({
           path: issue.path,
           message: issue.message,
         })),
+        warnings: [],
         legacyIssues: testState.legacyIssues,
       };
     }
@@ -174,30 +178,40 @@ export function createGatewayConfigModuleMock(actual: GatewayConfigModule): Gate
     try {
       await fs.access(configPath);
     } catch {
+      const composed = composeTestConfig({});
       return {
         path: configPath,
         exists: false,
         raw: null,
         parsed: {},
+        sourceConfig: composed as ResolvedSourceConfig,
+        resolved: composed as ResolvedSourceConfig,
         valid: true,
-        config: composeTestConfig({}),
+        runtimeConfig: composed as RuntimeConfig,
+        config: composed,
         hash: hashConfigRaw(null),
         issues: [],
+        warnings: [],
         legacyIssues: [],
       };
     }
     try {
       const raw = await fs.readFile(configPath, "utf-8");
       const parsed = JSON.parse(raw) as Record<string, unknown>;
+      const composed = composeTestConfig(parsed);
       return {
         path: configPath,
         exists: true,
         raw,
         parsed,
+        sourceConfig: composed as ResolvedSourceConfig,
+        resolved: composed as ResolvedSourceConfig,
         valid: true,
-        config: composeTestConfig(parsed),
+        runtimeConfig: composed as RuntimeConfig,
+        config: composed,
         hash: hashConfigRaw(raw),
         issues: [],
+        warnings: [],
         legacyIssues: [],
       };
     } catch (err) {
@@ -206,10 +220,14 @@ export function createGatewayConfigModuleMock(actual: GatewayConfigModule): Gate
         exists: true,
         raw: null,
         parsed: {},
+        sourceConfig: {} as ResolvedSourceConfig,
+        resolved: {} as ResolvedSourceConfig,
         valid: false,
-        config: {},
+        runtimeConfig: {} as RuntimeConfig,
+        config: {} as RuntimeConfig,
         hash: hashConfigRaw(null),
         issues: [{ path: "", message: `read failed: ${String(err)}` }],
+        warnings: [],
         legacyIssues: [],
       };
     }
