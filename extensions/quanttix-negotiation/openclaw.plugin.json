@@ -1,0 +1,43 @@
+{
+  "id": "quanttix-negotiation",
+  "name": "Quanttix Negotiation",
+  "description": "Autonomous AR/AP negotiation agent over Telegram. Replaces the legacy Python handoff_server with a native OpenClaw extension: HTTP route, tools, inbound-claim hook, and Redis-backed cross-process binding store.",
+  "enabledByDefault": false,
+  "skills": ["./skills"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "mode": {
+        "type": "string",
+        "enum": ["disabled", "shadow", "active"],
+        "default": "disabled",
+        "description": "Rollout mode. 'disabled' is inert. 'shadow' creates negotiations server-side but never sends Telegram. 'active' is the full path."
+      },
+      "backendBaseUrl": {
+        "type": "string",
+        "format": "uri",
+        "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://",
+        "description": "Quanttix Django backend base URL (e.g. http://127.0.0.1:8001)."
+      },
+      "redisUrl": {
+        "type": "string",
+        "pattern": "^redis(s)?://",
+        "default": "redis://127.0.0.1:6379",
+        "description": "Redis connection string used for chat↔negotiation binding store."
+      },
+      "agentId": {
+        "type": "string",
+        "default": "quanttix-negotiation",
+        "description": "OpenClaw agent id assigned by the inbound-claim hook when a chat has an active negotiation."
+      },
+      "bindingTtlSeconds": {
+        "type": "number",
+        "minimum": 60,
+        "maximum": 604800,
+        "default": 604800,
+        "description": "TTL for chat↔negotiation binding entries (default 7 days, matching legacy handoff_server)."
+      }
+    }
+  }
+}
