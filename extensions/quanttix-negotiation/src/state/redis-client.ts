@@ -22,8 +22,11 @@ export function getRedis(opts: RedisClientOptions): Redis | null {
   try {
     const client = new Redis(opts.url, {
       connectTimeout: 2000,
-      maxRetriesPerRequest: 1,
-      enableOfflineQueue: false,
+      // Keep offline queue enabled (ioredis default) so the first command issued before the
+      // TCP handshake settles is buffered instead of immediately rejected with
+      // "Stream isn't writeable". Connection failures still surface via the "error" event
+      // and individual commands time out per maxRetriesPerRequest.
+      maxRetriesPerRequest: 3,
       lazyConnect: false,
     });
     client.on("error", (err) => {
