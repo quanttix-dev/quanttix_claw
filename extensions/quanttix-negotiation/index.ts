@@ -8,12 +8,22 @@ import { createNegotiationToolFactories } from "./src/tools/index.js";
 
 type PluginMode = "disabled" | "shadow" | "active";
 
+type BackendConfig = {
+  baseUrl: string;
+  email: string;
+  password: string;
+  tenantId?: string;
+  empresaId?: string;
+  filialId?: string;
+};
+
 type ResolvedConfig = {
   mode: PluginMode;
-  backendBaseUrl: string;
   redisUrl: string;
   agentId: string;
   bindingTtlSeconds: number;
+  telegramBotToken: string;
+  backend: BackendConfig;
 };
 
 function readString(value: unknown): string | undefined {
@@ -32,18 +42,50 @@ function resolveConfig(api: OpenClawPluginApi): ResolvedConfig {
     readString(cfg["mode"]) ?? readString(env["QUANTTIX_NEGOTIATION_PLUGIN_MODE"]) ?? "disabled";
   const mode: PluginMode = modeRaw === "shadow" || modeRaw === "active" ? modeRaw : "disabled";
 
+  const backendCfg = (cfg["backend"] as Record<string, unknown> | undefined) ?? {};
+
+  // pluginConfig wins; env vars are fallback. We accept both BACKEND_SVC_* (plugin-native names)
+  // and QUANTTIX_API_* (matches the quanttix_ai .env convention) so a single source of truth
+  // can be reused without renaming the AI's env file.
   return {
     mode,
-    backendBaseUrl:
-      readString(cfg["backendBaseUrl"]) ??
-      readString(env["QUANTTIX_BACKEND_BASE_URL"]) ??
-      "http://127.0.0.1:8001",
     redisUrl:
       readString(cfg["redisUrl"]) ??
       readString(env["QUANTTIX_REDIS_URL"]) ??
       "redis://127.0.0.1:6379",
     agentId: readString(cfg["agentId"]) ?? "quanttix-negotiation",
     bindingTtlSeconds: readNumber(cfg["bindingTtlSeconds"]) ?? 7 * 24 * 60 * 60,
+    telegramBotToken:
+      readString(cfg["telegramBotToken"]) ?? readString(env["TELEGRAM_BOT_TOKEN"]) ?? "",
+    backend: {
+      baseUrl:
+        readString(backendCfg["baseUrl"]) ??
+        readString(env["QUANTTIX_BACKEND_BASE_URL"]) ??
+        readString(env["QUANTTIX_API_URL"]) ??
+        "",
+      email:
+        readString(backendCfg["email"]) ??
+        readString(env["BACKEND_SVC_EMAIL"]) ??
+        readString(env["QUANTTIX_API_EMAIL"]) ??
+        "",
+      password:
+        readString(backendCfg["password"]) ??
+        readString(env["BACKEND_SVC_PASSWORD"]) ??
+        readString(env["QUANTTIX_API_PASSWORD"]) ??
+        "",
+      tenantId:
+        readString(backendCfg["tenantId"]) ??
+        readString(env["BACKEND_TENANT_ID"]) ??
+        readString(env["QUANTTIX_API_TENANT_ID"]),
+      empresaId:
+        readString(backendCfg["empresaId"]) ??
+        readString(env["BACKEND_EMPRESA_ID"]) ??
+        readString(env["QUANTTIX_API_EMPRESA_ID"]),
+      filialId:
+        readString(backendCfg["filialId"]) ??
+        readString(env["BACKEND_FILIAL_ID"]) ??
+        readString(env["QUANTTIX_API_FILIAL_ID"]),
+    },
   };
 }
 
@@ -55,21 +97,26 @@ export default definePluginEntry({
     const cfg = resolveConfig(api);
 
     api.logger.info(
-      `[quanttix-negotiation] register mode=${cfg.mode} backend=${cfg.backendBaseUrl} redis=${cfg.redisUrl} agentId=${cfg.agentId}`,
+      `[quanttix-negotiation] register mode=${cfg.mode} backend=${cfg.backend.baseUrl || "<unset>"} redis=${cfg.redisUrl} agentId=${cfg.agentId} backendEmailSet=${cfg.backend.email ? "yes" : "no"} telegramTokenSet=${cfg.telegramBotToken ? "yes" : "no"}`,
     );
 
     if (cfg.mode === "disabled") {
       return;
     }
 
-    const env = process.env;
+    if (!cfg.backend.baseUrl || !cfg.backend.email || !cfg.backend.password) {
+      api.logger.warn(
+        "[quanttix-negotiation] backend baseUrl/email/password missing — plugin staying registered but /start and tools will fail at first call. Set plugins.entries.quanttix-negotiation.config.backend.{baseUrl,email,password} in openclaw.json.",
+      );
+    }
+
     const backend = new BackendClient({
-      baseUrl: cfg.backendBaseUrl,
-      svcEmail: env["BACKEND_SVC_EMAIL"] ?? "",
-      svcPassword: env["BACKEND_SVC_PASSWORD"] ?? "",
-      tenantId: env["BACKEND_TENANT_ID"],
-      empresaId: env["BACKEND_EMPRESA_ID"],
-      filialId: env["BACKEND_FILIAL_ID"],
+      baseUrl: cfg.backend.baseUrl,
+      svcEmail: cfg.backend.email,
+      svcPassword: cfg.backend.password,
+      tenantId: cfg.backend.tenantId,
+      empresaId: cfg.backend.empresaId,
+      filialId: cfg.backend.filialId,
       logger: api.logger,
     });
 
@@ -87,7 +134,7 @@ export default definePluginEntry({
         mode: cfg.mode,
         backend,
         bindingStore,
-        telegramBotToken: env["TELEGRAM_BOT_TOKEN"] ?? "",
+        telegramBotToken: cfg.telegramBotToken,
         logger: api.logger,
       }),
     });

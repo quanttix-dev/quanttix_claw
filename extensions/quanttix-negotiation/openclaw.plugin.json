@@ -14,12 +14,6 @@
         "default": "disabled",
         "description": "Rollout mode. 'disabled' is inert. 'shadow' creates negotiations server-side but never sends Telegram. 'active' is the full path."
       },
-      "backendBaseUrl": {
-        "type": "string",
-        "format": "uri",
-        "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://",
-        "description": "Quanttix Django backend base URL (e.g. http://127.0.0.1:8001)."
-      },
       "redisUrl": {
         "type": "string",
         "pattern": "^redis(s)?://",
@@ -37,6 +31,42 @@
         "maximum": 604800,
         "default": 604800,
         "description": "TTL for chat↔negotiation binding entries (default 7 days, matching legacy handoff_server)."
+      },
+      "telegramBotToken": {
+        "type": "string",
+        "description": "Telegram Bot API token used to send the first message in 'active' mode. Falls back to env TELEGRAM_BOT_TOKEN."
+      },
+      "backend": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Quanttix Django backend connection. Service-account credentials are used by the plugin and the registered tools.",
+        "properties": {
+          "baseUrl": {
+            "type": "string",
+            "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://",
+            "description": "Quanttix Django backend base URL (e.g. https://test.quanttix.com.br)."
+          },
+          "email": {
+            "type": "string",
+            "description": "Service-account email (e.g. svc_quanttix_claw@quanttix.com)."
+          },
+          "password": {
+            "type": "string",
+            "description": "Service-account password. Stored alongside the Telegram bot token in openclaw.json."
+          },
+          "tenantId": {
+            "type": "string",
+            "description": "X-Tenant-Id header for multi-tenant routing."
+          },
+          "empresaId": {
+            "type": "string",
+            "description": "X-Empresa-Id header."
+          },
+          "filialId": {
+            "type": "string",
+            "description": "X-Filial-Id header."
+          }
+        }
       }
     }
   }
