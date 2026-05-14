@@ -1,8 +1,9 @@
 import { Type, type Static } from "@sinclair/typebox";
-import type {
-  AnyAgentTool,
-  OpenClawPluginToolContext,
-  OpenClawPluginToolFactory,
+import {
+  jsonResult,
+  type AnyAgentTool,
+  type OpenClawPluginToolContext,
+  type OpenClawPluginToolFactory,
 } from "../../api.js";
 import { BackendClient, BackendClientError } from "../backend/client.js";
 
@@ -97,12 +98,14 @@ function idem(prefix: string, parts: string[]): string {
   return `${prefix}:${parts.join(":")}:${Date.now()}`;
 }
 
-function unwrap<T>(promise: Promise<T>): Promise<T | { _error: string; _code: number | null }> {
-  return promise.catch((err: unknown) => {
+// Wraps backend promises in AgentToolResult via jsonResult, so the LLM sees either
+// the raw payload or an { _error, _code } object — both serialized as JSON details.
+function unwrap<T>(promise: Promise<T>): Promise<ReturnType<typeof jsonResult>> {
+  return promise.then(jsonResult).catch((err: unknown) => {
     if (err instanceof BackendClientError) {
-      return { _error: err.message, _code: err.status };
+      return jsonResult({ _error: err.message, _code: err.status });
     }
-    return { _error: err instanceof Error ? err.message : String(err), _code: null };
+    return jsonResult({ _error: err instanceof Error ? err.message : String(err), _code: null });
   });
 }
 
