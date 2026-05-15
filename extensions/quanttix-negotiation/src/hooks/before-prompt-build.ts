@@ -62,18 +62,64 @@ function renderNegotiationContext(binding: Binding): string {
   ].join("\n");
 }
 
+// Best-effort chat_id extraction. The shape of session messages and ctx isn't part of the
+// stable plugin SDK; some sessions collapse to "main" dmScope so we have to look in multiple
+// places. We try, in order:
+//   1) ctx.sessionKey "agent:<id>:telegram:<kind>:<chat_id>" (precise, dmScope!=main)
+//   2) Any object in event.messages whose metadata or top-level fields mention a Telegram chat_id
+//   3) Sole active binding in Redis (only when there's exactly one — single-tenant smoke)
+function chatIdFromMessages(messages: unknown[]): string | null {
+  for (const m of messages) {
+    if (!m || typeof m !== "object") continue;
+    const obj = m as Record<string, unknown>;
+    // Scan candidate shapes without committing to a single one.
+    const candidates: unknown[] = [
+      obj["chat_id"],
+      obj["chatId"],
+      obj["peer"],
+      (obj["metadata"] as Record<string, unknown> | undefined)?.["chat_id"],
+      (obj["metadata"] as Record<string, unknown> | undefined)?.["chatId"],
+      (obj["metadata"] as Record<string, unknown> | undefined)?.["peerId"],
+      (obj["context"] as Record<string, unknown> | undefined)?.["chat_id"],
+    ];
+    for (const c of candidates) {
+      if (typeof c === "string" && c.length > 0) return c;
+      if (typeof c === "number") return String(c);
+      if (c && typeof c === "object" && "id" in (c as Record<string, unknown>)) {
+        const id = (c as Record<string, unknown>)["id"];
+        if (typeof id === "string" && id.length > 0) return id;
+        if (typeof id === "number") return String(id);
+      }
+    }
+  }
+  return null;
+}
+
 export function createBeforePromptBuildHandler(opts: BeforePromptBuildOptions) {
   return async function onBeforePromptBuild(
-    _event: { prompt: string; messages: unknown[] },
+    event: { prompt: string; messages: unknown[] },
     ctx: { agentId?: string; channelId?: string; sessionKey?: string },
   ): Promise<{ prependSystemContext: string } | void> {
     if (ctx?.agentId !== opts.agentId) return;
     if (ctx?.channelId !== "telegram") return;
 
-    const chatId = extractTelegramChatId(ctx.sessionKey);
+    let chatId = extractTelegramChatId(ctx.sessionKey);
+    let source = "sessionKey";
+
     if (!chatId) {
+      chatId = chatIdFromMessages(event.messages);
+      if (chatId) source = "messages";
+    }
+
+    if (!chatId) {
+      // Debug aid: log first message shape so we can refine extraction later if needed.
+      const firstMsg = event.messages[0];
+      const sample =
+        firstMsg && typeof firstMsg === "object"
+          ? Object.keys(firstMsg as Record<string, unknown>).join(",")
+          : typeof firstMsg;
       opts.logger.warn(
-        `[quanttix-negotiation][hook] before_prompt_build skipped — could not parse chat_id from sessionKey=${ctx.sessionKey}`,
+        `[quanttix-negotiation][hook] could not extract chat_id (sessionKey=${ctx.sessionKey}, msgCount=${event.messages.length}, firstMsgKeys=${sample}) — context injection skipped`,
       );
       return;
     }
@@ -85,7 +131,7 @@ export function createBeforePromptBuildHandler(opts: BeforePromptBuildOptions) {
     }
 
     opts.logger.info(
-      `[quanttix-negotiation][hook] before_prompt_build injected context chat=${chatId} neg=${binding.negociacao_id} title=${binding.title_id}`,
+      `[quanttix-negotiation][hook] injected context (source=${source}) chat=${chatId} neg=${binding.negociacao_id} title=${binding.title_id}`,
     );
     return { prependSystemContext: renderNegotiationContext(binding) };
   };
