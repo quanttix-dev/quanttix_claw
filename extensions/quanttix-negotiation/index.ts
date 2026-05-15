@@ -127,8 +127,11 @@ export default definePluginEntry({
     };
 
     // HTTP route — entry point called by quanttix_ai to kick off a negotiation.
+    // Path matches what the legacy quanttix_ai handoff_client.py posts to:
+    // it appends `/negotiation/start` to settings.HANDOFF_BASE_URL, so the
+    // plugin must expose `/plugins/quanttix-negotiation/negotiation/start`.
     api.registerHttpRoute({
-      path: "/plugins/quanttix-negotiation/start",
+      path: "/plugins/quanttix-negotiation/negotiation/start",
       auth: "gateway",
       handler: createStartRouteHandler({
         mode: cfg.mode,
