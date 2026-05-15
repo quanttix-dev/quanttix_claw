@@ -90,6 +90,11 @@ rules:
 
 defaults:
   expiracao_proposta_horas: 48
-  max_propostas_por_dia_por_contraparte: 3
+  # NOTE 2026-05-15 (Bloco 3.d smoke): raised from 3 to 999 to unblock the
+  # quanttix-negotiation plugin end-to-end smoke tests against the smoke
+  # counterpart 11111111111111. Revert (or move to a per-tenant config) before
+  # touching real counterparties in production. Same change is mirrored in
+  # quanttix_backend/src/treasury/config/negotiation_policy.yaml (operational copy).
+  max_propostas_por_dia_por_contraparte: 999
   max_negociacoes_simultaneas_global: 100
   rodada_maxima: 5            # apos 5 trocas, escala pra humano
