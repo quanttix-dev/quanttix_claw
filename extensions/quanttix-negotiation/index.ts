@@ -1,5 +1,6 @@
 import { definePluginEntry, type OpenClawPluginApi } from "./api.js";
 import { BackendClient } from "./src/backend/client.js";
+import { createBeforePromptBuildHandler } from "./src/hooks/before-prompt-build.js";
 import { createInboundClaimHandler } from "./src/hooks/on-inbound-claim.js";
 import { createStartRouteHandler } from "./src/http/start-route.js";
 import { type BindingStoreOptions } from "./src/state/binding-store.js";
@@ -152,6 +153,18 @@ export default definePluginEntry({
     api.on(
       "inbound_claim",
       createInboundClaimHandler({
+        bindingStore,
+        logger: api.logger,
+        agentId: cfg.agentId,
+      }),
+    );
+
+    // before_prompt_build — injects the active negotiation context (from Redis binding)
+    // into the agent system prompt so the LLM does not re-ask for title/counterpart info
+    // that was already established by the /start flow.
+    api.on(
+      "before_prompt_build",
+      createBeforePromptBuildHandler({
         bindingStore,
         logger: api.logger,
         agentId: cfg.agentId,
