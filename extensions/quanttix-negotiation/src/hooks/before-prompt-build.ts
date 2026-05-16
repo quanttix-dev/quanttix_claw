@@ -4,6 +4,8 @@ import {
   type Binding,
   type BindingStoreOptions,
 } from "../state/binding-store.js";
+import { getRedis } from "../state/redis-client.js";
+import { hookCtxRedisKey } from "./on-inbound-claim.js";
 
 export type BeforePromptBuildOptions = {
   bindingStore: BindingStoreOptions;
@@ -95,6 +97,22 @@ function chatIdFromMessages(messages: unknown[]): string | null {
   return null;
 }
 
+async function chatIdFromHookCtxBridge(
+  opts: BeforePromptBuildOptions,
+  agentId: string,
+  channelId: string,
+): Promise<string | null> {
+  const redis = getRedis({ url: opts.bindingStore.redisUrl, logger: opts.logger });
+  if (!redis) return null;
+  try {
+    const v = await redis.get(hookCtxRedisKey(agentId, channelId));
+    return v && v.length > 0 ? v : null;
+  } catch (err) {
+    opts.logger.warn(`[quanttix-negotiation][hook] hookctx read failed: ${String(err)}`);
+    return null;
+  }
+}
+
 export function createBeforePromptBuildHandler(opts: BeforePromptBuildOptions) {
   return async function onBeforePromptBuild(
     event: { prompt: string; messages: unknown[] },
@@ -112,7 +130,16 @@ export function createBeforePromptBuildHandler(opts: BeforePromptBuildOptions) {
     }
 
     if (!chatId) {
-      // Debug aid: log first message shape so we can refine extraction later if needed.
+      // Third fallback: chat_id published by on-inbound-claim into Redis under
+      // a key derived from (agentId, channelId) — the only two fields shared
+      // between PluginHookMessageContext (inbound) and PluginHookAgentContext
+      // (this hook). TTL is short, so it only matches if inbound_claim ran in
+      // the same turn.
+      chatId = await chatIdFromHookCtxBridge(opts, ctx.agentId, ctx.channelId);
+      if (chatId) source = "hookctx-bridge";
+    }
+
+    if (!chatId) {
       const firstMsg = event.messages[0];
       const sample =
         firstMsg && typeof firstMsg === "object"
