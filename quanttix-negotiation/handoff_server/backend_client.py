@@ -145,9 +145,11 @@ class BackendClient:
         novo_vencimento: Optional[date] = None,
         mensagem_agente: str = "",
         idempotency_key: Optional[str] = None,
+        title_uuid_ref: Optional[str] = None,
     ) -> dict:
         body = {
             "title_id": title_id,
+            "title_uuid_ref": title_uuid_ref,
             "counterpart_doc": counterpart_doc,
             "tipo_titulo": tipo_titulo,
             "valor_titulo": str(valor_titulo),
@@ -170,6 +172,8 @@ class BackendClient:
         negociacao_id: str,
         desconto_pct: Optional[Decimal] = None,
         valor_acordado: Optional[Decimal] = None,
+        num_parcelas: Optional[int] = None,
+        novo_vencimento: Optional[date] = None,
         mensagem_agente: str = "",
         idempotency_key: Optional[str] = None,
     ) -> dict:
@@ -177,7 +181,8 @@ class BackendClient:
             "terms": {
                 "desconto_pct": str(desconto_pct) if desconto_pct is not None else None,
                 "valor_acordado": str(valor_acordado) if valor_acordado is not None else None,
-                "num_parcelas": 1,
+                "num_parcelas": num_parcelas if num_parcelas is not None else 1,
+                "novo_vencimento": novo_vencimento.isoformat() if novo_vencimento else None,
                 "mensagem_agente": mensagem_agente,
             },
         }
@@ -199,6 +204,27 @@ class BackendClient:
             json_body={}, idempotency_key=idempotency_key,
         )
 
+    def accept_and_issue(
+        self,
+        *,
+        negociacao_id: str,
+        idempotency_key: Optional[str] = None,
+    ) -> dict:
+        """
+        Aceita a negociacao e emite boleto numa unica chamada atomica
+        (em AR). Retorno:
+          {"evento": NegotiationEventResponse,
+           "boleto": BoletoEmissaoResponse | None,
+           "boleto_error": str}
+        Para AP, ou quando Negotiation nao tem title_uuid_ref, retorna
+        boleto=None com boleto_error vazio.
+        """
+        return self._request(
+            "POST",
+            f"/api/v1/tesouraria/negotiation/{negociacao_id}/accept-and-issue",
+            json_body={}, idempotency_key=idempotency_key,
+        )
+
     def reject_negotiation(
         self,
         *,
@@ -212,4 +238,60 @@ class BackendClient:
             "POST",
             f"/api/v1/tesouraria/negotiation/{negociacao_id}/reject",
             json_body=body, idempotency_key=idempotency_key,
+        )
+
+    def escalate_negotiation(
+        self,
+        *,
+        negociacao_id: str,
+        reason: str,
+        context: Optional[dict] = None,
+        mensagem_agente: str = "",
+        idempotency_key: Optional[str] = None,
+    ) -> dict:
+        """
+        Escala negociacao para aprovacao humana. Backend cria
+        EscalationTicket + NegotiationEvent ESCALADA atomicamente e
+        marca Negotiation como ESCALADA.
+
+        `reason` deve ser um dos codigos padronizados aceitos pelo
+        backend (e.g. 'max_debtor_counters', 'out_of_envelope',
+        'hardship_detected').
+        """
+        body = {
+            "reason": reason,
+            "context": context or {},
+            "mensagem_agente": mensagem_agente,
+        }
+        return self._request(
+            "POST",
+            f"/api/v1/tesouraria/negotiation/{negociacao_id}/escalate",
+            json_body=body, idempotency_key=idempotency_key,
+        )
+
+    # ── Boleto (emissao pos-ACCEPT) ─────────────────────────────────
+
+    def emit_boleto(
+        self,
+        *,
+        title_uuid: str,
+        bank_code: Optional[str] = None,
+    ) -> dict:
+        """
+        Emite boleto para titulo a receber. `title_uuid` e o UUID do
+        AccountReceivable (NAO o codigo ERP). Endpoint e idempotente
+        no proprio backend: se ja existe boleto EMITIDO, retorna o
+        existente sem re-emitir.
+
+        Retorna BoletoEmissaoResponse:
+          id, account_receivable_id, nosso_numero, linha_digitavel,
+          barcode, status, bank_code, bank_name, due_date, amount, ...
+        """
+        body: dict = {}
+        if bank_code:
+            body["bank_code"] = bank_code
+        return self._request(
+            "POST",
+            f"/api/v1/tesouraria/boletos/contas-receber/{title_uuid}/boleto:emitir",
+            json_body=body,
         )

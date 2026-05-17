@@ -13,6 +13,7 @@ from typing import Optional
 import httpx
 
 from handoff_server.config import settings
+from handoff_server.session_binding import touch_binding
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,13 @@ class TelegramSender:
 
         if payload.get("ok"):
             result = payload.get("result", {})
+            # Renova TTL do binding tambem quando NOS enviamos —
+            # senao bindings de conversas longas (so envio, sem reply)
+            # poderiam expirar antes do contraparte responder.
+            try:
+                touch_binding(chat_id)
+            except Exception as exc:  # pragma: no cover — best effort
+                logger.debug(f"touch_binding falhou em send: {exc}")
             return TelegramResult(ok=True, message_id=result.get("message_id"))
         return TelegramResult(
             ok=False,

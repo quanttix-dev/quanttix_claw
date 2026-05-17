@@ -31,6 +31,28 @@ class Settings(BaseSettings):
     HANDOFF_HOST: str = "127.0.0.1"
     HANDOFF_PORT: int = 18790
 
+    # LLM classifier (Chat LLM via OpenAI-compat) — quando vazio, claw
+    # cai para keyword classifier. Default aponta para o llama.cpp do
+    # Qwen3-32B que ja roda no POD (Quanttix llm_api porta 8083).
+    LLM_CLASSIFIER_URL: str = "http://127.0.0.1:8083"
+    LLM_CLASSIFIER_MODEL: str = "qwen3-32b"
+
+    # Follow-up proativo (heartbeat)
+    HEARTBEAT_ENABLED: bool = True
+    HEARTBEAT_INTERVAL_SECONDS: int = 1800      # 30 min — varre bindings e retry queue
+    FOLLOWUP_IDLE_MIN_HOURS: int = 48           # so reaborda apos 48h de silencio
+    FOLLOWUP_IDLE_MAX_HOURS: int = 144          # nao reaborda se ja passou 6 dias (perto do TTL)
+
+    # Limite de contrapropostas que o devedor pode fazer antes de escalar.
+    # 1 = aceita a primeira contraproposta como rodada exploratoria, mas
+    # se ele voltar com outra mudanca, escala para humano (sem ficar em
+    # loop infinito de negociacao).
+    MAX_DEBTOR_COUNTERS: int = 1
+
+    # Robustez do ACCEPT: retry inline + fila Redis para confirmar depois.
+    ACCEPT_INLINE_RETRY_ATTEMPTS: int = 2       # tentativas alem da 1a
+    ACCEPT_INLINE_RETRY_BASE_MS: int = 250      # backoff base (250ms, 1s, 4s)
+
     # Telemetria
     LOG_LEVEL: str = "INFO"
 

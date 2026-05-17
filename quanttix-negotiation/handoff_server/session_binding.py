@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 _TTL_SECONDS = 7 * 24 * 60 * 60   # 7 dias
 _LOCK_TTL_SECONDS = 5             # lock breve para race condition
+_UPDATE_DEDUP_TTL_SECONDS = 24 * 60 * 60   # 24h — Telegram nao reentrega depois
 
 
 def _client() -> Optional[redis.Redis]:
@@ -60,6 +61,10 @@ def _lock_key(chat_id: str) -> str:
     return f"lock:chat:{chat_id}"
 
 
+def _update_seen_key(update_id: int) -> str:
+    return f"tg:update:seen:{update_id}"
+
+
 def _now_iso() -> str:
     return datetime.utcnow().isoformat() + "Z"
 
@@ -72,10 +77,19 @@ def create_binding(
     counterpart_nome: str,
     tipo_titulo: str,
     title_id: str,
+    title_uuid: Optional[str] = None,
     channel: str = "telegram",
 ) -> bool:
     """
     Cria as duas chaves espelhadas. Retorna False se Redis off.
+
+    `title_uuid` (opcional): UUID do AccountReceivable, usado para emitir
+    boleto pos-ACCEPT em AR. Quando ausente, o ACCEPT registra o evento
+    no backend mas a confirmacao ao contraparte fica generica.
+
+    `counter_count` rastreia quantas contrapropostas o devedor ja fez
+    nesta sessao (limita repetir negociacao sem fim — escala para humano
+    apos MAX_DEBTOR_COUNTERS).
     """
     client = _client()
     if client is None:
@@ -87,9 +101,11 @@ def create_binding(
         "counterpart_nome": counterpart_nome,
         "tipo_titulo": tipo_titulo,
         "title_id": title_id,
+        "title_uuid": title_uuid or "",
         "channel": channel,
         "bound_at": now,
         "last_touch_at": now,
+        "counter_count": 0,
     }
     neg_payload = {"channel": channel, "chat_id": chat_id}
     try:
@@ -157,6 +173,32 @@ def touch_binding(chat_id: str) -> None:
         logger.warning(f"session_binding: touch falhou: {exc}")
 
 
+def increment_counter_count(chat_id: str) -> int:
+    """
+    Incrementa o contador de contrapropostas do devedor neste binding.
+    Retorna o novo valor (>=1 apos incremento; 0 se binding nao existe).
+
+    Usado pelo classifier do webhook: apos N contrapropostas o agente
+    escala para humano em vez de registrar mais uma rodada.
+    """
+    client = _client()
+    if client is None:
+        return 0
+    binding = get_binding_by_chat(chat_id)
+    if not binding:
+        return 0
+    current = int(binding.get("counter_count", 0) or 0)
+    new_value = current + 1
+    binding["counter_count"] = new_value
+    binding["last_touch_at"] = _now_iso()
+    try:
+        client.setex(_chat_key(chat_id), _TTL_SECONDS, json.dumps(binding))
+    except Exception as exc:
+        logger.warning(f"session_binding: increment_counter falhou: {exc}")
+        return current
+    return new_value
+
+
 def release_binding(chat_id: str) -> None:
     """Apaga as duas chaves — usar em status terminal."""
     client = _client()
@@ -199,3 +241,23 @@ def release_lock(chat_id: str) -> None:
         client.delete(_lock_key(chat_id))
     except Exception:
         pass
+
+
+def mark_update_seen(update_id: int) -> bool:
+    """
+    Marca um update_id do Telegram como visto. Retorna True na primeira vez,
+    False se ja existia (duplicata de reentrega).
+
+    Sem Redis: degrada para True (best-effort, sem dedup).
+    """
+    client = _client()
+    if client is None:
+        return True
+    try:
+        ok = client.set(
+            _update_seen_key(update_id), "1",
+            nx=True, ex=_UPDATE_DEDUP_TTL_SECONDS,
+        )
+        return bool(ok)
+    except Exception:
+        return True

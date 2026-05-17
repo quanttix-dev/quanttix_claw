@@ -56,6 +56,11 @@ class HandoffRequest(BaseModel):
     instructions: HandoffInstructions = Field(default_factory=HandoffInstructions)
     # Sugestao de desconto do quanttix_ai (Chat LLM ja analisou)
     suggested_discount_pct: Optional[Decimal] = None
+    # UUID do AccountReceivable. Opcional aqui mas obrigatorio
+    # para que o claw consiga emitir boleto pos-ACCEPT (AR). Quando
+    # ausente, ACCEPT registra evento no backend mas a confirmacao
+    # ao contraparte fica generica ("setor financeiro entrara em contato").
+    title_uuid: Optional[str] = None
 
 
 class HandoffResponse(BaseModel):
@@ -144,6 +149,16 @@ def start_negotiation(
     authorization: Optional[str] = Header(None),
 ):
     _validate_bearer(authorization)
+    # AR exige title_uuid: sem ele nao ha como emitir boleto pos-ACCEPT.
+    # Rejeitamos cedo para nao criar Negotiation orfa no backend.
+    if req.tipo_titulo == "AR" and not req.title_uuid:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "title_uuid e obrigatorio para tipo_titulo=AR "
+                "(necessario para emitir boleto via /accept-and-issue)"
+            ),
+        )
     logger.info(
         "[handoff] start title=%s tipo=%s counterpart=%s chat=%s",
         req.title_id, req.tipo_titulo, req.counterpart_doc, req.chat_id,
@@ -158,6 +173,7 @@ def start_negotiation(
         try:
             evento = client.propose_negotiation(
                 title_id=req.title_id,
+                title_uuid_ref=req.title_uuid,
                 counterpart_doc=req.counterpart_doc,
                 tipo_titulo=req.tipo_titulo,
                 valor_titulo=req.valor_titulo,
@@ -183,6 +199,7 @@ def start_negotiation(
             counterpart_nome=req.counterpart_nome,
             tipo_titulo=req.tipo_titulo,
             title_id=req.title_id,
+            title_uuid=req.title_uuid,
         )
         if not binding_ok:
             logger.warning("[handoff] binding Redis falhou — segue sem binding")

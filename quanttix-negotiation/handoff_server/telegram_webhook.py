@@ -23,8 +23,16 @@ from pydantic import BaseModel
 
 from handoff_server.backend_client import BackendClient, BackendClientError
 from handoff_server.config import settings
+from handoff_server.llm_classifier import classify_reply_llm
+from handoff_server.operations import (
+    enqueue_boleto_retry,
+    enqueue_confirmation_retry,
+    incr_metric,
+)
 from handoff_server.session_binding import (
     get_binding_by_chat,
+    increment_counter_count,
+    mark_update_seen,
     release_binding,
     release_lock,
     touch_binding,
@@ -101,6 +109,16 @@ async def telegram_webhook(
     raw = await request.json()
     update = TelegramUpdate.model_validate(raw)
 
+    # Dedup contra reentrega do Telegram (mesmo update_id chegando >1x).
+    # SETNX no Redis com TTL 24h; em queda do Redis degrada para best-effort.
+    if not mark_update_seen(update.update_id):
+        logger.info(
+            "[webhook] update_id=%s ja processado — ignorando reentrega",
+            update.update_id,
+        )
+        incr_metric("webhook_duplicate_count")
+        return {"ok": True, "ignored": True, "reason": "duplicate update_id"}
+
     message = update.message or {}
     chat = message.get("chat") or {}
     chat_id = str(chat.get("id") or "")
@@ -112,7 +130,11 @@ async def telegram_webhook(
 
     binding = get_binding_by_chat(chat_id)
     if not binding:
-        logger.info(f"[webhook] chat_id={chat_id} sem binding — ignorando")
+        logger.info(
+            "[webhook] chat_id=%s update_id=%s sem binding — ignorando",
+            chat_id, update.update_id,
+        )
+        incr_metric("webhook_no_binding_count")
         return {"ok": True, "ignored": True, "reason": "sem binding"}
 
     # Lock para evitar processar 2 msgs do mesmo chat em paralelo
@@ -121,32 +143,124 @@ async def telegram_webhook(
 
     try:
         touch_binding(chat_id)
-        return _process_reply(binding, chat_id, text)
+        return _process_reply(binding, chat_id, text, update_id=update.update_id)
     finally:
         release_lock(chat_id)
 
 
-def _process_reply(binding: dict, chat_id: str, text: str) -> dict:
+def _process_reply(binding: dict, chat_id: str, text: str, *, update_id: int) -> dict:
     """Classifica reply e grava evento no backend. Retorna json para o Telegram."""
-    outcome = classify_reply(text)
     neg_id = binding["negociacao_id"]
     nome = binding.get("counterpart_nome", "")
-    idem = f"webhook:{neg_id}:{int(time.time())}"
+    tipo_titulo = binding.get("tipo_titulo", "")
+    title_id = binding.get("title_id", "")
+    title_uuid = binding.get("title_uuid", "") or ""
+    # update_id e estritamente unico por mensagem do Telegram —
+    # garante idempotencia real ao reprocessar o mesmo evento.
+    idem = f"tg:{update_id}"
+
+    # Classificacao: tenta LLM primeiro (Qwen3-32B em loopback). Em qualquer
+    # falha (timeout, LLM off, JSON quebrado), fallback para keyword.
+    extracted_terms: dict = {}
+    classification = classify_reply_llm(
+        text,
+        last_proposal_summary=f"titulo {title_id} ({tipo_titulo})",
+    )
+    if classification:
+        outcome = classification.outcome
+        extracted_terms = classification.extracted_terms or {}
+        logger.info(
+            "[webhook] LLM classify neg=%s outcome=%s conf=%.2f terms=%s",
+            neg_id, outcome, classification.confidence,
+            list(extracted_terms.keys()),
+        )
+    else:
+        outcome = classify_reply(text)
+        logger.info(
+            "[webhook] keyword classify (LLM indisponivel) neg=%s outcome=%s",
+            neg_id, outcome,
+        )
 
     client = BackendClient()
     sender = TelegramSender()
     try:
         if outcome == "ACCEPT":
-            evento = client.accept_negotiation(
-                negociacao_id=neg_id, idempotency_key=idem,
+            # Chamada atomica: o backend faz accept + emit_boleto numa unica
+            # transacao (so emite boleto em AR + com title_uuid_ref). Falha
+            # do boleto NAO faz rollback do accept — fica como retry.
+            #
+            # Robustez: tentamos inline com backoff exponencial. Se todas
+            # falharem, enfileiramos para o heartbeat tentar de novo e
+            # avisamos o cliente que estamos confirmando.
+            bundle, accept_error = _accept_and_issue_with_retry(
+                client, neg_id=neg_id, idem=idem,
             )
+            if bundle is None:
+                # Backend persistentemente indisponivel — enfileira e dispara
+                # mensagem de "aguarde". Cliente NAO fica em silencio.
+                enqueue_confirmation_retry(
+                    negociacao_id=neg_id, chat_id=chat_id,
+                    counterpart_nome=nome, title_id=title_id,
+                    title_uuid=title_uuid, tipo_titulo=tipo_titulo,
+                    idempotency_key=idem, error=str(accept_error),
+                )
+                sender.send_message(
+                    chat_id,
+                    f"Recebi seu aceite, {nome}! Estou confirmando aqui internamente "
+                    f"e em instantes te envio os dados para finalizar. "
+                    f"Aguarde so um momento, ja te retorno.",
+                )
+                # NAO libera binding — heartbeat precisa dele para confirmar depois.
+                logger.error(
+                    "[webhook] accept enfileirado para retry neg=%s err=%s",
+                    neg_id, accept_error,
+                )
+                return {
+                    "ok": True, "outcome": "ACCEPT_QUEUED",
+                    "evento_id": "", "boleto_id": "",
+                    "boleto_error": str(accept_error),
+                }
+
+            evento = bundle.get("evento", {})
+            boleto = bundle.get("boleto")
+            boleto_error = bundle.get("boleto_error", "")
+
+            if boleto:
+                logger.info(
+                    "[webhook] accept+boleto neg=%s nosso_numero=%s",
+                    neg_id, boleto.get("nosso_numero"),
+                )
+            elif boleto_error:
+                logger.warning(
+                    "[webhook] accept ok mas boleto falhou neg=%s: %s",
+                    neg_id, boleto_error,
+                )
+                enqueue_boleto_retry(
+                    negociacao_id=neg_id, title_uuid=title_uuid,
+                    chat_id=chat_id, counterpart_nome=nome,
+                    title_id=title_id, error=boleto_error,
+                )
+
             sender.send_message(
                 chat_id,
-                f"Perfeito, {nome}! Acordo registrado. "
-                f"Em instantes o boleto/comprovante chega para você. 🤝",
+                _format_acceptance_message(
+                    nome=nome,
+                    title_id=title_id,
+                    tipo_titulo=tipo_titulo,
+                    boleto=boleto,
+                ),
             )
             release_binding(chat_id)
-            return {"ok": True, "outcome": "ACCEPT", "evento_id": evento["evento_id"]}
+            incr_metric("accept_count")
+            if boleto:
+                incr_metric("boleto_emitted_count")
+            return {
+                "ok": True,
+                "outcome": "ACCEPT",
+                "evento_id": evento.get("evento_id", ""),
+                "boleto_id": (boleto or {}).get("id", ""),
+                "boleto_error": boleto_error,
+            }
 
         if outcome == "REJECT":
             evento = client.reject_negotiation(
@@ -161,11 +275,53 @@ def _process_reply(binding: dict, chat_id: str, text: str) -> dict:
                 f"Estamos a disposição para futuras oportunidades.",
             )
             release_binding(chat_id)
+            incr_metric("reject_count")
             return {"ok": True, "outcome": "REJECT", "evento_id": evento["evento_id"]}
 
-        # COUNTER — registra contraproposta sem extrair termos (v1)
+        # COUNTER — politica: aceitamos no maximo MAX_DEBTOR_COUNTERS
+        # contrapropostas do devedor. Apos isso, escalamos para humano
+        # (sem ficar em loop de "vou levar ao financeiro" eterno).
+        new_counter_count = increment_counter_count(chat_id)
+        if new_counter_count > settings.MAX_DEBTOR_COUNTERS:
+            # Excedeu — escala em vez de registrar mais uma rodada
+            try:
+                evento = client.escalate_negotiation(
+                    negociacao_id=neg_id,
+                    reason="max_debtor_counters",
+                    context={
+                        "counter_count": new_counter_count,
+                        "max_allowed": settings.MAX_DEBTOR_COUNTERS,
+                        "ultima_mensagem": text[:400],
+                        "extracted_terms": extracted_terms or {},
+                    },
+                    mensagem_agente=text[:400],
+                    idempotency_key=idem,
+                )
+            except BackendClientError as exc:
+                logger.error("[webhook] escalate falhou neg=%s: %s", neg_id, exc)
+                return {"ok": False, "outcome": "ESCALATE", "error": str(exc)}
+
+            sender.send_message(
+                chat_id,
+                f"Entendido, {nome}. Como sua contraproposta requer uma "
+                f"avaliacao especifica, vou encaminhar para o nosso financeiro. "
+                f"Voce recebera uma resposta final em breve.",
+            )
+            release_binding(chat_id)
+            incr_metric("escalated_count")
+            return {
+                "ok": True, "outcome": "ESCALATE",
+                "evento_id": evento.get("evento_id", ""),
+                "reason": "max_debtor_counters",
+            }
+
+        # Dentro do limite — registra contraproposta normal
         evento = client.register_counterproposal(
             negociacao_id=neg_id,
+            desconto_pct=extracted_terms.get("desconto_pct") if extracted_terms else None,
+            valor_acordado=extracted_terms.get("valor_acordado") if extracted_terms else None,
+            num_parcelas=extracted_terms.get("num_parcelas") if extracted_terms else None,
+            novo_vencimento=extracted_terms.get("novo_vencimento") if extracted_terms else None,
             mensagem_agente=text[:400],
             idempotency_key=idem,
         )
@@ -174,6 +330,7 @@ def _process_reply(binding: dict, chat_id: str, text: str) -> dict:
             f"Entendido, {nome}. Vou levar internamente sua contraproposta "
             f"e retorno em breve.",
         )
+        incr_metric("counter_count")
         return {"ok": True, "outcome": "COUNTER", "evento_id": evento["evento_id"]}
 
     except BackendClientError as exc:
@@ -182,3 +339,99 @@ def _process_reply(binding: dict, chat_id: str, text: str) -> dict:
     finally:
         client.close()
         sender.close()
+
+
+def _accept_and_issue_with_retry(
+    client: BackendClient, *, neg_id: str, idem: str,
+) -> tuple[Optional[dict], Optional[Exception]]:
+    """
+    Tenta `accept_and_issue` com backoff exponencial. A chamada e
+    idempotente no backend (Idempotency-Key), entao retry e seguro
+    mesmo se a chamada anterior tiver passado parcialmente.
+
+    Retorna (bundle, None) em sucesso; (None, exception) apos esgotar
+    todas as tentativas.
+    """
+    attempts = settings.ACCEPT_INLINE_RETRY_ATTEMPTS + 1   # +1 da tentativa inicial
+    base_ms = settings.ACCEPT_INLINE_RETRY_BASE_MS
+    last_exc: Optional[Exception] = None
+
+    for i in range(attempts):
+        try:
+            return client.accept_and_issue(
+                negociacao_id=neg_id, idempotency_key=idem,
+            ), None
+        except BackendClientError as exc:
+            last_exc = exc
+            if i < attempts - 1:
+                # Backoff: 250ms, 1s, 4s (base=250)
+                sleep_ms = base_ms * (4 ** i)
+                logger.warning(
+                    "[webhook] accept_and_issue tentativa %d/%d falhou neg=%s "
+                    "retry em %dms: %s",
+                    i + 1, attempts, neg_id, sleep_ms, exc,
+                )
+                incr_metric("accept_inline_retry_count")
+                time.sleep(sleep_ms / 1000.0)
+            else:
+                logger.error(
+                    "[webhook] accept_and_issue esgotou %d tentativas neg=%s: %s",
+                    attempts, neg_id, exc,
+                )
+    return None, last_exc
+
+
+def _format_acceptance_message(
+    *,
+    nome: str,
+    title_id: str,
+    tipo_titulo: str,
+    boleto: Optional[dict],
+) -> str:
+    """
+    Mensagem enviada apos ACCEPT.
+      - AR + boleto emitido: detalhes + linha digitavel
+      - AR sem boleto (falha) ou AP: confirmacao generica
+    """
+    if boleto:
+        amount = boleto.get("amount", "")
+        due_date = boleto.get("due_date", "")
+        nosso_numero = boleto.get("nosso_numero", "")
+        linha_digitavel = boleto.get("linha_digitavel", "")
+        return (
+            f"Negociação confirmada, {nome}!\n\n"
+            f"Boleto gerado com sucesso:\n"
+            f"- Título: {title_id}\n"
+            f"- Nosso Número: {nosso_numero}\n"
+            f"- Valor: {_fmt_brl(amount)}\n"
+            f"- Vencimento: {due_date}\n\n"
+            f"Linha digitável:\n{linha_digitavel}\n\n"
+            f"Copie a linha digitável acima para efetuar o pagamento. "
+            f"Agradecemos pela negociação!"
+        )
+
+    if tipo_titulo == "AP":
+        return (
+            f"Perfeito, {nome}! Acordo registrado para o título {title_id}.\n\n"
+            f"Nosso financeiro entrará em contato em breve com os dados "
+            f"para o pagamento e os próximos passos."
+        )
+
+    # AR sem boleto (title_uuid ausente ou falha de emissao)
+    return (
+        f"Perfeito, {nome}! Negociação confirmada para o título {title_id}.\n\n"
+        f"Estamos gerando o boleto e enviaremos em instantes. "
+        f"Caso não receba, entre em contato com nosso financeiro."
+    )
+
+
+def _fmt_brl(value) -> str:
+    """Formata Decimal/float/str como R$ no padrao BR (1.234,56)."""
+    try:
+        f = float(value)
+        return (
+            f"R$ {f:,.2f}"
+            .replace(",", "X").replace(".", ",").replace("X", ".")
+        )
+    except (ValueError, TypeError):
+        return f"R$ {value}"
