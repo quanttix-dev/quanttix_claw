@@ -29,8 +29,13 @@ from handoff_server.config import settings
 logger = logging.getLogger(__name__)
 
 
-_TIMEOUT_SECONDS = 8.0
-_MAX_TOKENS = 256
+# Qwen3-32B Q4_K_M leva 30-60s para classificar com think ativo.
+# Timeout precisa ser folgado o suficiente para nao cair para fallback
+# keyword (que nao trata "sim, mas em 3x" corretamente).
+_TIMEOUT_SECONDS = 90.0
+# Budget para think + JSON pequeno. Antes era 256 — apertado quando
+# think do Qwen3 ocupa o budget inteiro e o JSON sai truncado.
+_MAX_TOKENS = 1024
 
 
 @dataclass
