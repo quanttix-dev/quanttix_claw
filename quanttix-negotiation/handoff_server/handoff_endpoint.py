@@ -200,6 +200,8 @@ def start_negotiation(
             tipo_titulo=req.tipo_titulo,
             title_id=req.title_id,
             title_uuid=req.title_uuid,
+            valor_titulo=str(req.valor_titulo),
+            desconto_pct=str(req.suggested_discount_pct),
         )
         if not binding_ok:
             logger.warning("[handoff] binding Redis falhou — segue sem binding")

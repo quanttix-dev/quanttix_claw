@@ -64,6 +64,7 @@ _METRIC_KEYS = (
     "webhook_no_binding_count",
     "accept_inline_retry_count",
     "accept_queued_for_retry_count",
+    "boleto_ficticio_emitted_count",
 )
 
 
@@ -80,6 +81,29 @@ def incr_metric(name: str, by: int = 1) -> None:
         client.incrby(_metric_key(name), by)
     except Exception as exc:
         logger.debug("incr_metric falhou: %s", exc)
+
+
+# ── Sequencia para Nosso Numero do boleto ficticio ──────────────────────
+
+
+_BOLETO_SIM_SEQ_KEY = "boleto:simulado:seq"
+
+
+def next_boleto_simulado_seq() -> int:
+    """Sequencial atomico para o Nosso Numero do boleto ficticio.
+
+    Sem Redis: fallback para timestamp epoch (best-effort; possivel
+    colisao se duas instancias rodarem simultaneamente, o que nao e o
+    caso em test). Chave nao tem TTL — counter cumulativo.
+    """
+    client = _client()
+    if client is None:
+        return int(datetime.utcnow().timestamp())
+    try:
+        return int(client.incr(_BOLETO_SIM_SEQ_KEY))
+    except Exception as exc:
+        logger.debug("next_boleto_simulado_seq falhou: %s", exc)
+        return int(datetime.utcnow().timestamp())
 
 
 def get_metrics() -> dict[str, int]:

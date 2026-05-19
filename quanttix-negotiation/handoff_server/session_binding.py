@@ -79,6 +79,8 @@ def create_binding(
     title_id: str,
     title_uuid: Optional[str] = None,
     channel: str = "telegram",
+    valor_titulo: Optional[str] = None,
+    desconto_pct: Optional[str] = None,
 ) -> bool:
     """
     Cria as duas chaves espelhadas. Retorna False se Redis off.
@@ -90,6 +92,10 @@ def create_binding(
     `counter_count` rastreia quantas contrapropostas o devedor ja fez
     nesta sessao (limita repetir negociacao sem fim — escala para humano
     apos MAX_DEBTOR_COUNTERS).
+
+    `valor_titulo` e `desconto_pct` (strings de Decimal) sao persistidos
+    para que o ACCEPT possa gerar o boleto ficticio sem reconsultar o
+    backend quando o Protheus devolve 404 / DataEng ainda nao esta ativo.
     """
     client = _client()
     if client is None:
@@ -106,6 +112,8 @@ def create_binding(
         "bound_at": now,
         "last_touch_at": now,
         "counter_count": 0,
+        "valor_titulo": valor_titulo or "",
+        "desconto_pct": desconto_pct or "",
     }
     neg_payload = {"channel": channel, "chat_id": chat_id}
     try:

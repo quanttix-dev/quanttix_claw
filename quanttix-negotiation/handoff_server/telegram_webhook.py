@@ -16,18 +16,26 @@ v2: substituir classifier por LLM (Gemma via quanttix-planner OpenClaw).
 
 import logging
 import time
+from datetime import date, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from handoff_server.backend_client import BackendClient, BackendClientError
+from handoff_server.boleto_pdf_generator import (
+    BoletoFicticioInput,
+    gerar_identificadores_cnab,
+    gerar_pdf,
+)
 from handoff_server.config import settings
 from handoff_server.llm_classifier import classify_reply_llm
 from handoff_server.operations import (
     enqueue_boleto_retry,
     enqueue_confirmation_retry,
     incr_metric,
+    next_boleto_simulado_seq,
 )
 from handoff_server.session_binding import (
     get_binding_by_chat,
@@ -75,6 +83,104 @@ def classify_reply(text: str) -> str:
         if kw in normalized:
             return "REJECT"
     return "COUNTER"
+
+
+# ── Boleto ficticio (gerado quando backend devolve boleto=None) ────
+
+
+def _emit_boleto_ficticio(
+    *,
+    sender: TelegramSender,
+    binding: dict,
+    chat_id: str,
+    neg_id: str,
+) -> Optional[dict]:
+    """Gera e envia o boleto ficticio do handoff_server via Telegram.
+
+    Retorna um dict no mesmo formato que o backend devolveria quando
+    emite um boleto real (compativel com _format_acceptance_message),
+    ou None se nao foi possivel gerar (valores ausentes no binding ou
+    falha no envio Telegram).
+    """
+    # 1. Recupera valores do binding (persistidos no handoff inicial).
+    valor_titulo_raw = binding.get("valor_titulo") or ""
+    desconto_pct_raw = binding.get("desconto_pct") or ""
+    try:
+        valor_nominal = Decimal(valor_titulo_raw)
+        desconto_pct = Decimal(desconto_pct_raw)
+    except (InvalidOperation, ValueError):
+        logger.warning(
+            "[ficticio] binding sem valor/desconto neg=%s — pulando ficticio",
+            neg_id,
+        )
+        return None
+
+    valor_final = (
+        valor_nominal - (valor_nominal * desconto_pct / Decimal("100"))
+    ).quantize(Decimal("0.01"))
+
+    # 2. Identificadores CNAB com sequencia atomica Redis.
+    seq = next_boleto_simulado_seq()
+    dt_emissao = date.today()
+    dt_vencimento = dt_emissao + timedelta(days=15)
+    nosso_numero, linha_digitavel, codigo_barras = gerar_identificadores_cnab(
+        seq_global=seq,
+        valor_final=valor_final,
+        dt_vencimento=dt_vencimento,
+    )
+
+    # 3. Monta input e gera PDF em memoria.
+    data = BoletoFicticioInput(
+        title_id_erp=binding.get("title_id", ""),
+        valor_nominal=valor_nominal,
+        desconto_pct=desconto_pct,
+        valor_final=valor_final,
+        dt_emissao=dt_emissao,
+        dt_vencimento=dt_vencimento,
+        counterpart_nome=binding.get("counterpart_nome", ""),
+        counterpart_doc=binding.get("counterpart_doc", ""),
+        nosso_numero=nosso_numero,
+        linha_digitavel=linha_digitavel,
+        codigo_barras=codigo_barras,
+    )
+    try:
+        pdf_bytes = gerar_pdf(data)
+    except Exception as exc:
+        logger.exception(
+            "[ficticio] geracao PDF falhou neg=%s: %s", neg_id, exc,
+        )
+        return None
+
+    # 4. Envia via Telegram (multipart). Caption discreto — o detalhe
+    # com linha digitavel vai na mensagem texto subsequente.
+    filename = f"boleto_{binding.get('title_id', 'titulo')}.pdf"
+    caption = "Boleto da negociação em anexo (ambiente de simulação)."
+    result = sender.send_document(
+        chat_id, document=pdf_bytes, filename=filename, caption=caption,
+    )
+    if not result.ok:
+        logger.error(
+            "[ficticio] send_document falhou neg=%s: %s",
+            neg_id, result.error_description,
+        )
+        return None
+
+    incr_metric("boleto_ficticio_emitted_count")
+    logger.info(
+        "[ficticio] enviado neg=%s nosso_numero=%s message_id=%s",
+        neg_id, nosso_numero, result.message_id,
+    )
+
+    # 5. Devolve dict no formato do backend para reusar o formatador.
+    return {
+        "id": f"sim-{neg_id}",
+        "nosso_numero": nosso_numero,
+        "linha_digitavel": linha_digitavel,
+        "codigo_barras": codigo_barras,
+        "amount": str(valor_final),
+        "due_date": dt_vencimento.strftime("%d/%m/%Y"),
+        "is_simulated": True,
+    }
 
 
 # ── Schemas ──────────────────────────────────────────────────────
@@ -230,16 +336,27 @@ def _process_reply(binding: dict, chat_id: str, text: str, *, update_id: int) ->
                     "[webhook] accept+boleto neg=%s nosso_numero=%s",
                     neg_id, boleto.get("nosso_numero"),
                 )
-            elif boleto_error:
-                logger.warning(
-                    "[webhook] accept ok mas boleto falhou neg=%s: %s",
-                    neg_id, boleto_error,
-                )
-                enqueue_boleto_retry(
-                    negociacao_id=neg_id, title_uuid=title_uuid,
-                    chat_id=chat_id, counterpart_nome=nome,
-                    title_id=title_id, error=boleto_error,
-                )
+            else:
+                # Backend nao emitiu boleto (Protheus 404 / DataEng off / AP).
+                # Em AR: fallback para boleto ficticio do handoff_server
+                # ate o DataEng (vendor=AIRFLOW_SIM) entrar em producao.
+                if boleto_error:
+                    logger.warning(
+                        "[webhook] accept ok mas boleto falhou neg=%s: %s",
+                        neg_id, boleto_error,
+                    )
+                    enqueue_boleto_retry(
+                        negociacao_id=neg_id, title_uuid=title_uuid,
+                        chat_id=chat_id, counterpart_nome=nome,
+                        title_id=title_id, error=boleto_error,
+                    )
+                if tipo_titulo == "AR":
+                    boleto = _emit_boleto_ficticio(
+                        sender=sender,
+                        binding=binding,
+                        chat_id=chat_id,
+                        neg_id=neg_id,
+                    )
 
             sender.send_message(
                 chat_id,
@@ -252,7 +369,7 @@ def _process_reply(binding: dict, chat_id: str, text: str, *, update_id: int) ->
             )
             release_binding(chat_id)
             incr_metric("accept_count")
-            if boleto:
+            if boleto and not boleto.get("is_simulated"):
                 incr_metric("boleto_emitted_count")
             return {
                 "ok": True,
